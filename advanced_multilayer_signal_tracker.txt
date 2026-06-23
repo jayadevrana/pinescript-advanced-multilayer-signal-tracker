@@ -1,0 +1,1747 @@
+//@version=6
+indicator("Advanced Multi-Layer Signal Tracker", "AdvSignalTrack", overlay=true, max_labels_count=100, max_lines_count=100, max_bars_back=250)
+
+// —————————————————————————————————————————————————————————————————————————————
+// Library & Helper Functions
+// —————————————————————————————————————————————————————————————————————————————
+f_clamp(value, min_val, max_val) => math.max(min_val, math.min(value, max_val))
+f_bbp(_s, _len, _mult) =>
+    [_, upper, lower] = ta.bb(_s, _len, _mult)
+    bb_range = math.max(upper - lower, 1e-10)
+    (_s - lower) / bb_range
+f_get_bb_region(bbp_val) =>
+	if bbp_val > 1
+		"A"
+	else if bbp_val == 1
+		"AA"
+	else if bbp_val < 0
+		"D"
+	else if bbp_val == 0
+		"DD"
+	else
+		"B"
+
+f_get_cci_region(cci_val) =>
+	if cci_val > 100
+		"A"
+	else if cci_val == 100
+		"AA"
+	else if cci_val >= 0 and cci_val < 100
+		"B"
+	else if cci_val < 0 and cci_val > -100
+		"C"
+	else if cci_val < -100
+		"D"
+	else
+		"DD"
+
+f_round_max(value, round_value, delta) =>
+	decimal_part = value % 1
+	result = decimal_part >= round_value ? math.ceil(value) + 1 + delta : math.ceil(value) + delta
+	result
+f_round_min(value, round_value, delta) =>
+	decimal_part = value % 1
+	result = decimal_part < 1 - round_value ? math.floor(value) - 1 - delta : math.floor(value) - delta
+	result
+
+f_python_indicators(src, high, low, close, round_val_input, delta_input) =>
+	var float original_high = 0, var float original_low = 9999999
+	float MAXA = 0.0, float MINA = 0.0, var bool is_shadow_bar = false, int breakout_signal = 0
+	if high <= original_high and low >= original_low
+		is_shadow_bar := true, RA = (0.309 * (high - low)) + close, SA = math.abs((0.309 * (high - low)) - close)
+		MAXA := math.max(math.max(math.max(high, RA), original_high), MAXA[1]), MINA := math.min(math.min(math.min(low, SA), original_low), MINA[1])
+	else
+		if is_shadow_bar[1]
+			if high > original_high
+				breakout_signal := 1
+			else if low < original_low
+				breakout_signal := -1
+		is_shadow_bar := false, original_high := high, original_low := low
+		RA = (0.309 * (high - low)) + close, SA = math.abs((0.309 * (high - low)) - close)
+		MAXA := math.max(high, RA), MINA := math.min(low, SA)
+	float MAXAr = f_round_max(MAXA, round_val_input, delta_input), float MINAr = f_round_min(MINA, round_val_input, delta_input)
+	[MAXAr, MINAr, is_shadow_bar, original_high, original_low, breakout_signal, MAXA, MINA]
+
+
+// —————————————————————————————————————————————————————————————————————————————
+// User Interface (UI)
+// —————————————————————————————————————————————————————————————————————————————
+
+group_general = "General Settings"
+calc_last_bars = input.int(2000, "Calculate Last N Bars", group=group_general, minval=0, tooltip="To save resources, the indicator will only perform its expensive calculations for the most recent N bars. Set to 0 to disable and use the fixed 'Start Time' input instead.")
+start_bar_input = input.int(0, "Or Start Calculations From Bar Index", group=group_general, tooltip="If 'Calculate Last N Bars' is 0, this fixed start bar index will be used. The indicator will only calculate on bars after this index.")
+
+var int calc_start_bar = na
+if barstate.islast
+    if calc_last_bars > 0
+        calc_start_bar := bar_index - calc_last_bars
+    else
+        calc_start_bar := start_bar_input
+src = input.source(hlc3, "Source", group=group_general)
+bbLen = 20
+bbMult = 2.0
+cciLen = 20
+round_val_input = input.float(0.7, "Rounding Decimal", group=group_general)
+delta_input = input.int(0, "Delta", group=group_general)
+showMaxaMinaLabels = input.bool(false, "Show MAXA/MINA Labels", group=group_general)
+
+// —————————————————————————————————————————————————————————————————————————————
+// User Interface (UI) discontinued
+// —————————————————————————————————————————————————————————————————————————————
+
+// Global Quick Access Values
+bbp_val_global = f_bbp(src, bbLen, bbMult)
+cci_val_global = ta.cci(src, cciLen)
+
+bbp_crossover_A = ta.crossover(bbp_val_global, 1.0)
+bbp_crossunder_A = ta.crossunder(bbp_val_global, 1.0)
+bbp_crossover_B = ta.crossover(bbp_val_global, 0.5)
+bbp_crossunder_B = ta.crossunder(bbp_val_global, 0.5)
+bbp_crossover_C = ta.crossover(bbp_val_global, 0.0)
+bbp_crossunder_C = ta.crossunder(bbp_val_global, 0.0)
+
+cci_crossover_A = ta.crossover(cci_val_global, 100)
+cci_crossunder_A = ta.crossunder(cci_val_global, 100)
+cci_crossover_B = ta.crossover(cci_val_global, 0)
+cci_crossunder_B = ta.crossunder(cci_val_global, 0)
+cci_crossover_C = ta.crossover(cci_val_global, -100)
+cci_crossunder_C = ta.crossunder(cci_val_global, -100)
+
+f_get_cci_region2(cci_val) =>
+	if cci_val >= 100
+		"A"
+	else if cci_val <= -100
+		"C"
+	else
+		"B"
+
+f_get_bb_region2(bbp_val) =>
+	if bbp_val >= 1
+		"A"
+	else if bbp_val <= 0
+		"C"
+	else
+		"B"
+
+var string third_region_cci = f_get_cci_region2(cci_val_global[2])
+var string second_region_cci = f_get_cci_region2(cci_val_global[1])
+var string first_region_cci = f_get_cci_region2(cci_val_global)
+current_region_cci = f_get_cci_region2(cci_val_global)
+if current_region_cci != first_region_cci
+	third_region_cci := second_region_cci
+	second_region_cci := first_region_cci
+	first_region_cci := current_region_cci
+
+
+var string third_region_bbp = f_get_bb_region2(bbp_val_global[2])
+var string second_region_bbp = f_get_bb_region2(bbp_val_global[1])
+var string first_region_bbp = f_get_bb_region2(bbp_val_global)
+current_region_bbp = f_get_bb_region2(bbp_val_global)
+if current_region_bbp != first_region_bbp
+	third_region_bbp := second_region_bbp
+	second_region_bbp := first_region_bbp
+	first_region_bbp := current_region_bbp
+
+string last_3_regions_bbp = third_region_bbp + second_region_bbp + first_region_bbp
+string last_3_regions_cci = third_region_cci + second_region_cci + first_region_cci
+
+[maxar_global, minar_global, _, _, _, _, _, _] = f_python_indicators(src, high, low, close, round_val_input, delta_input)
+
+
+// f_cci_breakout_logic(cci_val, constraint, maxar, minar, high_, low_) =>
+// 	var float ref = maxar, var bool valid = false, var bool valid_upper = false, var bool valid_lower = false, var int last_dir = 0
+// 	int breakout_event = 0, var int breakout_bar = na
+// 	var int case2_stage = 0
+
+// 	if valid and valid_upper and high_ > ref
+// 		breakout_event := 1, last_dir := 1, valid := false, breakout_bar := bar_index, case2_stage := 0, valid_upper := false, valid_lower := false
+// 	if valid and valid_lower and low_ < ref
+// 		breakout_event := -1, last_dir := -1, valid := false, breakout_bar := bar_index, case2_stage := 0, valid_lower := false, valid_upper := false
+
+
+// 	if ta.crossover(cci_val, constraint)
+// 		ref := maxar, valid := true, valid_upper := true, valid_lower := false, breakout_bar := na, case2_stage := 0
+// 	if ta.crossunder(cci_val, constraint)
+// 		ref := minar, valid := true, valid_lower := true, valid_upper := false, breakout_bar := na
+// 	if constraint == 0.0 and cci_crossunder_C and valid_lower and valid
+// 		case2_stage := 1
+// 	if case2_stage == 1 and cci_crossover_C
+// 		case2_stage := 2, valid_lower := false
+// 	if case2_stage == 2 and cci_crossunder_C
+// 		case2_stage := 0, ref := minar, valid := true, valid_lower := true, valid_upper := false, breakout_bar := na
+
+// 	if constraint == 100 and cci_crossunder_B and valid_lower and valid
+// 		case2_stage := 1
+// 	if case2_stage == 1 and cci_crossover_B
+// 		case2_stage := 2, valid_lower := false
+// 	if case2_stage == 2 and cci_crossunder_B
+// 		case2_stage := 0, ref := minar, valid := true, valid_lower := true, valid_upper := false, breakout_bar := na
+
+// 	if constraint == 100 and cci_crossunder_C and valid_lower and valid
+// 		case2_stage := 1
+// 	if case2_stage == 1 and cci_crossover_C
+// 		case2_stage := 2, valid_lower := false
+// 	if case2_stage == 2 and cci_crossunder_C
+// 		case2_stage := 0, ref := minar, valid := true, valid_lower := true, valid_upper := false, breakout_bar := na
+
+
+// 	if constraint == 0.0 and cci_crossover_A and valid == true and valid_upper == true
+// 		case2_stage := 1
+// 	if case2_stage == 1 and cci_crossunder_A
+// 		case2_stage := 2, valid_upper := false
+// 	if case2_stage == 2 and cci_crossover_A
+// 		case2_stage := 0, ref := maxar, valid := true, valid_upper := true, valid_lower := false, breakout_bar := na
+
+// 	if constraint == -100 and cci_crossover_B and valid == true and valid_upper == true
+// 		case2_stage := 1
+// 	if case2_stage == 1 and cci_crossunder_B
+// 		case2_stage := 2, valid_upper := false
+// 	if case2_stage == 2 and cci_crossover_B
+// 		case2_stage := 0, ref := maxar, valid := true, valid_upper := true, valid_lower := false, breakout_bar := na
+
+// 	if constraint == -100 and cci_crossover_A and valid == true and valid_upper == true
+// 		case2_stage := 1
+// 	if case2_stage == 1 and cci_crossunder_A
+// 		case2_stage := 2, valid_upper := false
+// 	if case2_stage == 2 and cci_crossover_A
+// 		case2_stage := 0, ref := maxar, valid := true, valid_upper := true, valid_lower := false, breakout_bar := na
+
+// 	[breakout_event, ref, last_dir, breakout_bar]
+
+enum BreakoutState
+	NONE
+	JUST_UP
+	JUST_DOWN
+	UP
+	DOWN
+	DU_1
+	DU_2
+	UD_1
+	UD_2
+
+
+f_cci_breakout_logic(cci_val, constraint, maxar, minar, high_, low_) =>
+	var float ref = maxar, var int last_dir = 0
+	int breakout_event = 0, var int breakout_bar = 0
+	var state = BreakoutState.NONE
+	if ta.crossover(cci_val, constraint)
+		ref := maxar, state := BreakoutState.JUST_UP
+	if ta.crossunder(cci_val, constraint)
+		ref := minar, state := BreakoutState.JUST_DOWN
+
+	if state == BreakoutState.JUST_UP
+		state := BreakoutState.UP
+	else if state == BreakoutState.JUST_DOWN
+		state := BreakoutState.DOWN
+
+	if state == BreakoutState.UP
+		if high_ > ref
+			breakout_event := 1, last_dir := 1, breakout_bar := bar_index, state := BreakoutState.NONE
+	else if state == BreakoutState.DOWN
+		if low_ < ref
+			breakout_event := -1, last_dir := -1, breakout_bar := bar_index, state := BreakoutState.NONE
+
+	if state == BreakoutState.UP
+		if (cci_crossunder_B or cci_crossunder_A) and constraint == -100
+			state := BreakoutState.UD_1
+	else if state == BreakoutState.DOWN
+		if (cci_crossover_B or cci_crossover_C) and constraint == 100
+			state := BreakoutState.DU_1
+	else if state == BreakoutState.UD_1
+		if cci_crossover_C or cci_crossover_B
+			ref := maxar, state := BreakoutState.UP
+	else if state == BreakoutState.DU_1
+		if cci_crossunder_C or cci_crossunder_B
+			ref := minar, state := BreakoutState.DOWN
+
+	[breakout_event, ref, last_dir, breakout_bar]
+
+
+[cci_A_event, ref_cci_A, cci_A_state, cci_A_bar] = f_cci_breakout_logic(cci_val_global, 100, maxar_global, minar_global, high, low)
+[cci_B_event, ref_cci_B, cci_B_state, cci_B_bar] = f_cci_breakout_logic(cci_val_global, 0, maxar_global, minar_global, high, low)
+[cci_C_event, ref_cci_C, cci_C_state, cci_C_bar] = f_cci_breakout_logic(cci_val_global, -100, maxar_global, minar_global, high, low)
+
+f_bbp_breakout_logic(bbp_val, constraint, maxar, minar, high_, low_) =>
+	var float ref = maxar, var int last_dir = 0
+	int breakout_event = 0, var int breakout_bar = 0
+	var state = BreakoutState.NONE
+	if ta.crossover(bbp_val, constraint)
+		ref := maxar, state := BreakoutState.JUST_UP
+	if ta.crossunder(bbp_val, constraint)
+		ref := minar, state := BreakoutState.JUST_DOWN
+
+	if state == BreakoutState.JUST_UP
+		state := BreakoutState.UP
+	else if state == BreakoutState.JUST_DOWN
+		state := BreakoutState.DOWN
+
+	if state == BreakoutState.UP
+		if high_ > ref
+			breakout_event := 1, last_dir := 1, breakout_bar := bar_index, state := BreakoutState.NONE
+	else if state == BreakoutState.DOWN
+		if low_ < ref
+			breakout_event := -1, last_dir := -1, breakout_bar := bar_index, state := BreakoutState.NONE
+
+	if state == BreakoutState.UP
+		if (bbp_crossunder_B or bbp_crossunder_A) and constraint == 0.0
+			state := BreakoutState.UD_1
+	else if state == BreakoutState.DOWN
+		if (bbp_crossover_B or bbp_crossover_C) and constraint == 1.0
+			state := BreakoutState.DU_1
+	else if state == BreakoutState.UD_1
+		if bbp_crossover_C or bbp_crossover_B
+			ref := maxar, state := BreakoutState.UP
+	else if state == BreakoutState.DU_1
+		if (bbp_crossunder_C or bbp_crossunder_B)
+			ref := minar, state := BreakoutState.DOWN
+
+	[breakout_event, ref, last_dir, breakout_bar]
+
+[bbp_A_event, ref_bbp_A, bbp_A_state, bbp_A_bar] = f_bbp_breakout_logic(bbp_val_global, 1.0, maxar_global, minar_global, high, low)
+[bbp_B_event, ref_bbp_B, bbp_B_state, bbp_B_bar] = f_bbp_breakout_logic(bbp_val_global, 0.5, maxar_global, minar_global, high, low)
+[bbp_C_event, ref_bbp_C, bbp_C_state, bbp_C_bar] = f_bbp_breakout_logic(bbp_val_global, 0.0, maxar_global, minar_global, high, low)
+
+f_get_signal_reset_data(src, bbLen, bbMult, cciLen, round_val_input, delta_input) =>
+	bbp_val = f_bbp(src, bbLen, bbMult)
+	cci_val = ta.cci(src, cciLen)
+	[maxar, minar, _, _, _, _, _, _] = f_python_indicators(src, high, low, close, round_val_input, delta_input)
+
+	sig_cci100_up = cci_crossover_A ? 1 : 0
+	sig_cci100_down = cci_crossunder_A ? -1 : 0
+	sig_cci0_up = cci_crossover_B ? 1 : 0
+	sig_cci0_down = cci_crossunder_B ? -1 : 0
+	sig_cci_100_up = cci_crossover_C ? 1 : 0
+	sig_cci_100_down = cci_crossunder_C ? -1 : 0
+	sig_bbp1_up = bbp_crossover_A ? 1 : 0
+	sig_bbp1_down = bbp_crossunder_A ? -1 : 0
+	sig_bbp05_up = bbp_crossover_B ? 1 : 0
+	sig_bbp05_down = bbp_crossunder_B ? -1 : 0
+	sig_bbp0_up = bbp_crossover_C ? 1 : 0
+	sig_bbp0_down = bbp_crossunder_C ? -1 : 0
+
+	[sig_cci_bA, _, _, _] = f_cci_breakout_logic(cci_val, 100, maxar, minar, high, low)
+	[sig_cci_bB, _, _, _] = f_cci_breakout_logic(cci_val, 0, maxar, minar, high, low)
+	[sig_cci_bC, _, _, _] = f_cci_breakout_logic(cci_val, -100, maxar, minar, high, low)
+	[sig_bbp_bA, _, _, _] = f_bbp_breakout_logic(bbp_val, 1, maxar, minar, high, low)
+	[sig_bbp_bB, _, _, _] = f_bbp_breakout_logic(bbp_val, 0.5, maxar, minar, high, low)
+	[sig_bbp_bC, _, _, _] = f_bbp_breakout_logic(bbp_val, 0, maxar, minar, high, low)
+
+	[sig_cci100_up, sig_cci100_down, sig_cci0_up, sig_cci0_down, sig_cci_100_up, sig_cci_100_down, sig_bbp1_up, sig_bbp1_down, sig_bbp05_up, sig_bbp05_down, sig_bbp0_up, sig_bbp0_down, sig_cci_bA, sig_cci_bB, sig_cci_bC, sig_bbp_bA, sig_bbp_bB, sig_bbp_bC]
+
+reset_target_is_bullish(string setting) => setting == "Bullish" or setting == "Both"
+reset_target_is_bearish(string setting) => setting == "Bearish" or setting == "Both"
+
+
+f_arrow_reset_logic(value, reset_bbp_A_event, reset_bbp_B_state, reset_bbp_C_event, reset_bb_region, op1, op2, op3, op4, op5, op6, show_cci100_up, sig_cci100_up, show_cci100_down, sig_cci100_down, show_cci0_up, sig_cci0_up, show_cci0_down, sig_cci0_down, show_cci_100_up, sig_cci_100_up, show_cci_100_down, sig_cci_100_down, show_bbp1_up, sig_bbp1_up, show_bbp1_down, sig_bbp1_down, show_bbp05_up, sig_bbp05_up, show_bbp05_down, sig_bbp05_down, show_bbp0_up, sig_bbp0_up, show_bbp0_down, sig_bbp0_down, show_cci_bA, sig_cci_bA, show_cci_bB, sig_cci_bB, show_cci_bC, sig_cci_bC, show_bbp_bA, sig_bbp_bA, show_bbp_bB, sig_bbp_bB, show_bbp_bC, sig_bbp_bC, reset_bbp_A_event_2, reset_bbp_B_state_2, reset_bbp_C_event_2, reset_bb_region_2, op1_2, op2_2, op3_2, op4_2, op5_2, op6_2, show_cci100_up_2, sig_cci100_up_2, show_cci100_down_2, sig_cci100_down_2, show_cci0_up_2, sig_cci0_up_2, show_cci0_down_2, sig_cci0_down_2, show_cci_100_up_2, sig_cci_100_up_2, show_cci_100_down_2, sig_cci_100_down_2, show_bbp1_up_2, sig_bbp1_up_2, show_bbp1_down_2, sig_bbp1_down_2, show_bbp05_up_2, sig_bbp05_up_2, show_bbp05_down_2, sig_bbp05_down_2, show_bbp0_up_2, sig_bbp0_up_2, show_bbp0_down_2, sig_bbp0_down_2, show_cci_bA_2, sig_cci_bA_2, show_cci_bB_2, sig_cci_bB_2, show_cci_bC_2, sig_cci_bC_2, show_bbp_bA_2, sig_bbp_bA_2, show_bbp_bB_2, sig_bbp_bB_2, show_bbp_bC_2, sig_bbp_bC_2) =>
+	bool do_reset = false
+	if value == 1  // Bullish arrow reset logic
+		bool original_reset = (reset_bbp_B_state == -1 and op1) or ((bbp_val_global >= 1) and op2) or (reset_bbp_C_event == -1 and op3)
+
+
+		bool signal_reset = (reset_target_is_bullish(show_cci100_down) and sig_cci100_down == -1) or
+		  (reset_target_is_bullish(show_cci0_down) and sig_cci0_down == -1) or
+		  (reset_target_is_bullish(show_cci_100_down) and sig_cci_100_down == -1) or
+		  (reset_target_is_bullish(show_bbp1_down) and sig_bbp1_down == -1) or
+		  (reset_target_is_bullish(show_bbp05_down) and sig_bbp05_down == -1) or
+		  (reset_target_is_bullish(show_bbp0_down) and sig_bbp0_down == -1) or
+		  (reset_target_is_bullish(show_cci_bA) and sig_cci_bA == -1) or
+		  (reset_target_is_bullish(show_cci_bB) and sig_cci_bB == -1) or
+		  (reset_target_is_bullish(show_cci_bC) and sig_cci_bC == -1) or
+		  (reset_target_is_bullish(show_bbp_bA) and sig_bbp_bA == -1) or
+		  (reset_target_is_bullish(show_bbp_bB) and sig_bbp_bB == -1) or
+		  (reset_target_is_bullish(show_bbp_bC) and sig_bbp_bC == -1)
+
+		bool original_reset_2 = (reset_bbp_B_state_2 == -1 and op1_2) or ((reset_bb_region_2 == 'A' or reset_bb_region_2 == 'AA') and op2_2) or (reset_bbp_C_event_2 == -1 and op3_2)
+		bool signal_reset_2 = (reset_target_is_bullish(show_cci100_down_2) and sig_cci100_down_2 == -1) or
+		  (reset_target_is_bullish(show_cci0_down_2) and sig_cci0_down_2 == -1) or
+		  (reset_target_is_bullish(show_cci_100_down_2) and sig_cci_100_down_2 == -1) or
+		  (reset_target_is_bullish(show_bbp1_down_2) and sig_bbp1_down_2 == -1) or
+		  (reset_target_is_bullish(show_bbp05_down_2) and sig_bbp05_down_2 == -1) or
+		  (reset_target_is_bullish(show_bbp0_down_2) and sig_bbp0_down_2 == -1) or
+		  (reset_target_is_bullish(show_cci_bA_2) and sig_cci_bA_2 == -1) or
+		  (reset_target_is_bullish(show_cci_bB_2) and sig_cci_bB_2 == -1) or
+		  (reset_target_is_bullish(show_cci_bC_2) and sig_cci_bC_2 == -1) or
+		  (reset_target_is_bullish(show_bbp_bA_2) and sig_bbp_bA_2 == -1) or
+		  (reset_target_is_bullish(show_bbp_bB_2) and sig_bbp_bB_2 == -1) or
+		  (reset_target_is_bullish(show_bbp_bC_2) and sig_bbp_bC_2 == -1)
+
+		do_reset := original_reset or signal_reset or original_reset_2 or signal_reset_2
+	else if value == -1  // Bearish arrow reset logic
+		bool original_reset = (reset_bbp_B_state == 1 and op4) or (reset_bbp_A_event == 1 and op5) or ((bbp_val_global <= 0) and op6)
+
+
+		bool signal_reset = (reset_target_is_bearish(show_cci100_up) and sig_cci100_up == 1) or
+		  (reset_target_is_bearish(show_cci0_up) and sig_cci0_up == 1) or
+		  (reset_target_is_bearish(show_cci_100_up) and sig_cci_100_up == 1) or
+		  (reset_target_is_bearish(show_bbp1_up) and sig_bbp1_up == 1) or
+		  (reset_target_is_bearish(show_bbp05_up) and sig_bbp05_up == 1) or
+		  (reset_target_is_bearish(show_bbp0_up) and sig_bbp0_up == 1) or
+		  (reset_target_is_bearish(show_cci_bA) and sig_cci_bA == 1) or
+		  (reset_target_is_bearish(show_cci_bB) and sig_cci_bB == 1) or
+		  (reset_target_is_bearish(show_cci_bC) and sig_cci_bC == 1) or
+		  (reset_target_is_bearish(show_bbp_bA) and sig_bbp_bA == 1) or
+		  (reset_target_is_bearish(show_bbp_bB) and sig_bbp_bB == 1) or
+		  (reset_target_is_bearish(show_bbp_bC) and sig_bbp_bC == 1)
+
+		bool original_reset_2 = (reset_bbp_B_state_2 == 1 and op4_2) or (reset_bbp_A_event_2 == 1 and op5_2) or ((reset_bb_region_2 == 'D' or reset_bb_region_2 == 'DD') and op6_2)
+		bool signal_reset_2 = (reset_target_is_bearish(show_cci100_up_2) and sig_cci100_up_2 == 1) or
+		  (reset_target_is_bearish(show_cci0_up_2) and sig_cci0_up_2 == 1) or
+		  (reset_target_is_bearish(show_cci_100_up_2) and sig_cci_100_up_2 == 1) or
+		  (reset_target_is_bearish(show_bbp1_up_2) and sig_bbp1_up_2 == 1) or
+		  (reset_target_is_bearish(show_bbp05_up_2) and sig_bbp05_up_2 == 1) or
+		  (reset_target_is_bearish(show_bbp0_up_2) and sig_bbp0_up_2 == 1) or
+		  (reset_target_is_bearish(show_cci_bA_2) and sig_cci_bA_2 == 1) or
+		  (reset_target_is_bearish(show_cci_bB_2) and sig_cci_bB_2 == 1) or
+		  (reset_target_is_bearish(show_cci_bC_2) and sig_cci_bC_2 == 1) or
+		  (reset_target_is_bearish(show_bbp_bA_2) and sig_bbp_bA_2 == 1) or
+		  (reset_target_is_bearish(show_bbp_bB_2) and sig_bbp_bB_2 == 1) or
+		  (reset_target_is_bearish(show_bbp_bC_2) and sig_bbp_bC_2 == 1)
+		do_reset := original_reset or signal_reset or original_reset_2 or signal_reset_2
+	// else if value == 2 // simul_breakout bull reset logic
+	// 	do_reset := f_arrow_reset_logic(1, reset_bbp_A_event, reset_bbp_B_state, reset_bbp_C_event, reset_bb_region, op1, op2, op3, op4, op5, op6, show_cci100_up, sig_cci100_up, show_cci100_down, sig_cci100_down, show_cci0_up, sig_cci0_up, show_cci0_down, sig_cci0_down, show_cci_100_up, sig_cci_100_up, show_cci_100_down, sig_cci_100_down, show_bbp1_up, sig_bbp1_up, show_bbp1_down, sig_bbp1_down, show_bbp05_up, sig_bbp05_up, show_bbp05_down, sig_bbp05_down, show_bbp0_up, sig_bbp0_up, show_bbp0_down, sig_bbp0_down, show_cci_bA, sig_cci_bA, show_cci_bB, sig_cci_bB, show_cci_bC, sig_cci_bC, show_bbp_bA, sig_bbp_bA, show_bbp_bB, sig_bbp_bB, show_bbp_bC, sig_bbp_bC, reset_bbp_A_event_2, reset_bbp_B_state_2, reset_bbp_C_event_2, reset_bb_region_2, op1_2, op2_2, op3_2, op4_2, op5_2, op6_2, show_cci100_up_2, sig_cci100_up_2, show_cci100_down_2, sig_cci100_down_2, show_cci0_up_2, sig_cci0_up_2, show_cci0_down_2, sig_cci0_down_2, show_cci_100_up_2, sig_cci_100_up_2, show_cci_100_down_2, sig_cci_100_down_2, show_bbp1_up_2, sig_bbp1_up_2, show_bbp1_down_2, sig_bbp1_down_2, show_bbp05_up_2, sig_bbp05_up_2, show_bbp05_down_2, sig_bbp05_down_2, show_bbp0_up_2, sig_bbp0_up_2, show_bbp0_down_2, sig_bbp0_down_2, show_cci_bA_2, sig_cci_bA_2, show_cci_bB_2, sig_cci_bB_2, show_cci_bC_2, sig_cci_bC_2, show_bbp_bA_2, sig_bbp_bA_2, show_bbp_bB_2, sig_bbp_bB_2, show_bbp_bC_2, sig_bbp_bC_2)
+	// else if value == -2 // simul_breakout bear reset logic
+	// 	do_reset := f_arrow_reset_logic(-1, reset_bbp_A_event, reset_bbp_B_state, reset_bbp_C_event, reset_bb_region, op1, op2, op3, op4, op5, op6, show_cci100_up, sig_cci100_up, show_cci100_down, sig_cci100_down, show_cci0_up, sig_cci0_up, show_cci0_down, sig_cci0_down, show_cci_100_up, sig_cci_100_up, show_cci_100_down, sig_cci_100_down, show_bbp1_up, sig_bbp1_up, show_bbp1_down, sig_bbp1_down, show_bbp05_up, sig_bbp05_up, show_bbp05_down, sig_bbp05_down, show_bbp0_up, sig_bbp0_up, show_bbp0_down, sig_bbp0_down, show_cci_bA, sig_cci_bA, show_cci_bB, sig_cci_bB, show_cci_bC, sig_cci_bC, show_bbp_bA, sig_bbp_bA, show_bbp_bB, sig_bbp_bB, show_bbp_bC, sig_bbp_bC, reset_bbp_A_event_2, reset_bbp_B_state_2, reset_bbp_C_event_2, reset_bb_region_2, op1_2, op2_2, op3_2, op4_2, op5_2, op6_2, show_cci100_up_2, sig_cci100_up_2, show_cci100_down_2, sig_cci100_down_2, show_cci0_up_2, sig_cci0_up_2, show_cci0_down_2, sig_cci0_down_2, show_cci_100_up_2, sig_cci_100_up_2, show_cci_100_down_2, sig_cci_100_down_2, show_bbp1_up_2, sig_bbp1_up_2, show_bbp1_down_2, sig_bbp1_down_2, show_bbp05_up_2, sig_bbp05_up_2, show_bbp05_down_2, sig_bbp05_down_2, show_bbp0_up_2, sig_bbp0_up_2, show_bbp0_down_2, sig_bbp0_down_2, show_cci_bA_2, sig_cci_bA_2, show_cci_bB_2, sig_cci_bB_2, show_cci_bC_2, sig_cci_bC_2, show_bbp_bA_2, sig_bbp_bA_2, show_bbp_bB_2, sig_bbp_bB_2, show_bbp_bC_2, sig_bbp_bC_2)
+	do_reset
+
+type LabelInfo
+    int label_id = na      // The label's ID, stored in a field called `label`.
+    int   barIndex = na      // The bar index where the label was created.
+    float price    = na      // The price at which the label was created.
+    string text_val    = ""
+	color color_val = na     // The text displayed on the label.
+	string tf_ = na
+
+var LabelInfo currentLabelInfo = LabelInfo.new()
+
+f_set_label_info(label_id, bar_index, price, text_val, color_ = color.white, tf_ = "") =>
+	currentLabelInfo.label_id := label_id
+	currentLabelInfo.barIndex := bar_index
+	currentLabelInfo.price := price
+	currentLabelInfo.text_val := text_val
+    currentLabelInfo.color_val := color_
+    currentLabelInfo.tf_ := tf_
+
+f_reset_label_info() =>
+	currentLabelInfo.label_id := na
+	currentLabelInfo.barIndex := na
+	currentLabelInfo.price := na
+	currentLabelInfo.text_val := ""
+	currentLabelInfo.color_val := na
+	currentLabelInfo.tf_ := na
+
+// Function to create a label on a specific bar
+f_createLabel(index, price, text_) =>
+	if currentLabelInfo.label_id == 1
+		label.new(x=index, y=price, text=text_ + "\n" + currentLabelInfo.tf_, textcolor=currentLabelInfo.color_val, style=label.style_label_down, yloc=yloc.abovebar, size=size.tiny, color=na)
+	else
+		label.new(x=index, y=price, text=text_ + "\n" + currentLabelInfo.tf_, textcolor=currentLabelInfo.color_val, style=label.style_label_up, yloc=yloc.belowbar, size=size.tiny, color=na)
+
+
+
+
+f_arrow1_signal(bbp_val, cci_val, maxar, minar, high, low, reset_bbp_A_event, reset_bbp_B_state, reset_bbp_C_event, reset_bb_region, op1, op2, op3, op4, op5, op6, show_cci100_up, show_cci100_down, show_cci0_up, show_cci0_down, show_cci_100_up, show_cci_100_down, show_bbp1_up, show_bbp1_down, show_bbp05_up, show_bbp05_down, show_bbp0_up, show_bbp0_down, show_cci_bA, show_cci_bB, show_cci_bC, show_bbp_bA, show_bbp_bB, show_bbp_bC, rsig_cci100_up, rsig_cci100_down, rsig_cci0_up, rsig_cci0_down, rsig_cci_100_up, rsig_cci_100_down, rsig_bbp1_up, rsig_bbp1_down, rsig_bbp05_up, rsig_bbp05_down, rsig_bbp0_up, rsig_bbp0_down, rsig_cci_bA, rsig_cci_bB, rsig_cci_bC, rsig_bbp_bA, rsig_bbp_bB, rsig_bbp_bC, reset_bbp_A_event_2, reset_bbp_B_state_2, reset_bbp_C_event_2, reset_bb_region_2, op1_2, op2_2, op3_2, op4_2, op5_2, op6_2, show_cci100_up_2, show_cci100_down_2, show_cci0_up_2, show_cci0_down_2, show_cci_100_up_2, show_cci_100_down_2, show_bbp1_up_2, show_bbp1_down_2, show_bbp05_up_2, show_bbp05_down_2, show_bbp0_up_2, show_bbp0_down_2, show_cci_bA_2, show_cci_bB_2, show_cci_bC_2, show_bbp_bA_2, show_bbp_bB_2, show_bbp_bC_2, rsig_cci100_up_2, rsig_cci100_down_2, rsig_cci0_up_2, rsig_cci0_down_2, rsig_cci_100_up_2, rsig_cci_100_down_2, rsig_bbp1_up_2, rsig_bbp1_down_2, rsig_bbp05_up_2, rsig_bbp05_down_2, rsig_bbp0_up_2, rsig_bbp0_down_2, rsig_cci_bA_2, rsig_cci_bB_2, rsig_cci_bC_2, rsig_bbp_bA_2, rsig_bbp_bB_2, rsig_bbp_bC_2) =>
+	var bull_value = 0, var bear_value = 0
+	// Reset if out of BBP range
+	if cci_A_event == 1 and last_3_regions_cci == "CBA"
+		if bbp_A_event == 1
+			f_set_label_info(1, bar_index, high, "▣A1", tf_ = timeframe.period)
+			bull_value := 1
+		else
+			f_set_label_info(1, bar_index, high, "□A1", tf_ = timeframe.period)
+			bull_value := 1
+
+	if cci_C_event == -1 and last_3_regions_cci == "ABC"
+		if bbp_C_event == -1
+			f_set_label_info(1, bar_index, low, "▣A1", tf_ = timeframe.period)
+			bear_value := -1
+		else
+			f_set_label_info(1, bar_index, low, "□A1", tf_ = timeframe.period)
+			bear_value := -1
+
+	// bbp_between = bbp_val_global > 0 and bbp_val_global < 1
+	// if not bbp_between
+	// 	bull_value := 0
+
+	if f_arrow_reset_logic(bull_value, reset_bbp_A_event, reset_bbp_B_state, reset_bbp_C_event, reset_bb_region, op1, op2, op3, op4, op5, op6, show_cci100_up, rsig_cci100_up, show_cci100_down, rsig_cci100_down, show_cci0_up, rsig_cci0_up, show_cci0_down, rsig_cci0_down, show_cci_100_up, rsig_cci_100_up, show_cci_100_down, rsig_cci_100_down, show_bbp1_up, rsig_bbp1_up, show_bbp1_down, rsig_bbp1_down, show_bbp05_up, rsig_bbp05_up, show_bbp05_down, rsig_bbp05_down, show_bbp0_up, rsig_bbp0_up, show_bbp0_down, rsig_bbp0_down, show_cci_bA, rsig_cci_bA, show_cci_bB, rsig_cci_bB, show_cci_bC, rsig_cci_bC, show_bbp_bA, rsig_bbp_bA, show_bbp_bB, rsig_bbp_bB, show_bbp_bC, rsig_bbp_bC, reset_bbp_A_event_2, reset_bbp_B_state_2, reset_bbp_C_event_2, reset_bb_region_2, op1_2, op2_2, op3_2, op4_2, op5_2, op6_2, show_cci100_up_2, rsig_cci100_up_2, show_cci100_down_2, rsig_cci100_down_2, show_cci0_up_2, rsig_cci0_up_2, show_cci0_down_2, rsig_cci0_down_2, show_cci_100_up_2, rsig_cci_100_up_2, show_cci_100_down_2, rsig_cci_100_down_2, show_bbp1_up_2, rsig_bbp1_up_2, show_bbp1_down_2, rsig_bbp1_down_2, show_bbp05_up_2, rsig_bbp05_up_2, show_bbp05_down_2, rsig_bbp05_down_2, show_bbp0_up_2, rsig_bbp0_up_2, show_bbp0_down_2, rsig_bbp0_down_2, show_cci_bA_2, rsig_cci_bA_2, show_cci_bB_2, rsig_cci_bB_2, show_cci_bC_2, rsig_cci_bC_2, show_bbp_bA_2, rsig_bbp_bA_2, show_bbp_bB_2, rsig_bbp_bB_2, show_bbp_bC_2, rsig_bbp_bC_2)
+		bull_value := 0
+
+	if f_arrow_reset_logic(bear_value, reset_bbp_A_event, reset_bbp_B_state, reset_bbp_C_event, reset_bb_region, op1, op2, op3, op4, op5, op6, show_cci100_up, rsig_cci100_up, show_cci100_down, rsig_cci100_down, show_cci0_up, rsig_cci0_up, show_cci0_down, rsig_cci0_down, show_cci_100_up, rsig_cci_100_up, show_cci_100_down, rsig_cci_100_down, show_bbp1_up, rsig_bbp1_up, show_bbp1_down, rsig_bbp1_down, show_bbp05_up, rsig_bbp05_up, show_bbp05_down, rsig_bbp05_down, show_bbp0_up, rsig_bbp0_up, show_bbp0_down, rsig_bbp0_down, show_cci_bA, rsig_cci_bA, show_cci_bB, rsig_cci_bB, show_cci_bC, rsig_cci_bC, show_bbp_bA, rsig_bbp_bA, show_bbp_bB, rsig_bbp_bB, show_bbp_bC, rsig_bbp_bC, reset_bbp_A_event_2, reset_bbp_B_state_2, reset_bbp_C_event_2, reset_bb_region_2, op1_2, op2_2, op3_2, op4_2, op5_2, op6_2, show_cci100_up_2, rsig_cci100_up_2, show_cci100_down_2, rsig_cci100_down_2, show_cci0_up_2, rsig_cci0_up_2, show_cci0_down_2, rsig_cci0_down_2, show_cci_100_up_2, rsig_cci_100_up_2, show_cci_100_down_2, rsig_cci_100_down_2, show_bbp1_up_2, rsig_bbp1_up_2, show_bbp1_down_2, rsig_bbp1_down_2, show_bbp05_up_2, rsig_bbp05_up_2, show_bbp05_down_2, rsig_bbp05_down_2, show_bbp0_up_2, rsig_bbp0_up_2, show_bbp0_down_2, rsig_bbp0_down_2, show_cci_bA_2, rsig_cci_bA_2, show_cci_bB_2, rsig_cci_bB_2, show_cci_bC_2, rsig_cci_bC_2, show_bbp_bA_2, rsig_bbp_bA_2, show_bbp_bB_2, rsig_bbp_bB_2, show_bbp_bC_2, rsig_bbp_bC_2)
+		bear_value := 0
+
+	[bull_value, bear_value]
+
+
+
+f_arrow0_signal(bbp_val, cci_val, maxar, minar, high, low, reset_bbp_A_event, reset_bbp_B_state, reset_bbp_C_event, reset_bb_region, op1, op2, op3, op4, op5, op6, show_cci100_up, show_cci100_down, show_cci0_up, show_cci0_down, show_cci_100_up, show_cci_100_down, show_bbp1_up, show_bbp1_down, show_bbp05_up, show_bbp05_down, show_bbp0_up, show_bbp0_down, show_cci_bA, show_cci_bB, show_cci_bC, show_bbp_bA, show_bbp_bB, show_bbp_bC, rsig_cci100_up, rsig_cci100_down, rsig_cci0_up, rsig_cci0_down, rsig_cci_100_up, rsig_cci_100_down, rsig_bbp1_up, rsig_bbp1_down, rsig_bbp05_up, rsig_bbp05_down, rsig_bbp0_up, rsig_bbp0_down, rsig_cci_bA, rsig_cci_bB, rsig_cci_bC, rsig_bbp_bA, rsig_bbp_bB, rsig_bbp_bC, reset_bbp_A_event_2, reset_bbp_B_state_2, reset_bbp_C_event_2, reset_bb_region_2, op1_2, op2_2, op3_2, op4_2, op5_2, op6_2, show_cci100_up_2, show_cci100_down_2, show_cci0_up_2, show_cci0_down_2, show_cci_100_up_2, show_cci_100_down_2, show_bbp1_up_2, show_bbp1_down_2, show_bbp05_up_2, show_bbp05_down_2, show_bbp0_up_2, show_bbp0_down_2, show_cci_bA_2, show_cci_bB_2, show_cci_bC_2, show_bbp_bA_2, show_bbp_bB_2, show_bbp_bC_2, rsig_cci100_up_2, rsig_cci100_down_2, rsig_cci0_up_2, rsig_cci0_down_2, rsig_cci_100_up_2, rsig_cci_100_down_2, rsig_bbp1_up_2, rsig_bbp1_down_2, rsig_bbp05_up_2, rsig_bbp05_down_2, rsig_bbp0_up_2, rsig_bbp0_down_2, rsig_cci_bA_2, rsig_cci_bB_2, rsig_cci_bC_2, rsig_bbp_bA_2, rsig_bbp_bB_2, rsig_bbp_bC_2) =>
+	var float refa = na, var float refb = na
+	var int bull_value = 0, var int bear_value = 0
+	var bool valida = true, var bool allowed = true
+	bbp_between = bbp_val > 0 and bbp_val < 1
+	if not bbp_between
+		bull_value := 0
+		bear_value := 0
+	if bbp_crossunder_A and cci_val > 100
+		valida := true, refa := maxar, allowed := true
+	if bbp_crossover_C and cci_val < -100
+		valida := false, refb := minar, allowed := true
+	if bbp_crossunder_C or bbp_crossover_A
+		allowed := false
+	if allowed and (cci_crossunder_C or cci_crossover_A)
+		allowed := false
+	if valida == true and allowed and high > refa and cci_val > 100 and bbp_val < 1
+		bull_value := 1
+		// f_set_label_info(1, bar_index, high, "A1B")
+	if valida == false and allowed and low < refb and cci_val < -100 and bbp_val > 0
+		bear_value := -1
+		// f_set_label_info(-1, bar_index, high, "A1S")
+	if f_arrow_reset_logic(bull_value, reset_bbp_A_event, reset_bbp_B_state, reset_bbp_C_event, reset_bb_region, op1, op2, op3, op4, op5, op6, show_cci100_up, rsig_cci100_up, show_cci100_down, rsig_cci100_down, show_cci0_up, rsig_cci0_up, show_cci0_down, rsig_cci0_down, show_cci_100_up, rsig_cci_100_up, show_cci_100_down, rsig_cci_100_down, show_bbp1_up, rsig_bbp1_up, show_bbp1_down, rsig_bbp1_down, show_bbp05_up, rsig_bbp05_up, show_bbp05_down, rsig_bbp05_down, show_bbp0_up, rsig_bbp0_up, show_bbp0_down, rsig_bbp0_down, show_cci_bA, rsig_cci_bA, show_cci_bB, rsig_cci_bB, show_cci_bC, rsig_cci_bC, show_bbp_bA, rsig_bbp_bA, show_bbp_bB, rsig_bbp_bB, show_bbp_bC, rsig_bbp_bC, reset_bbp_A_event_2, reset_bbp_B_state_2, reset_bbp_C_event_2, reset_bb_region_2, op1_2, op2_2, op3_2, op4_2, op5_2, op6_2, show_cci100_up_2, rsig_cci100_up_2, show_cci100_down_2, rsig_cci100_down_2, show_cci0_up_2, rsig_cci0_up_2, show_cci0_down_2, rsig_cci0_down_2, show_cci_100_up_2, rsig_cci_100_up_2, show_cci_100_down_2, rsig_cci_100_down_2, show_bbp1_up_2, rsig_bbp1_up_2, show_bbp1_down_2, rsig_bbp1_down_2, show_bbp05_up_2, rsig_bbp05_up_2, show_bbp05_down_2, rsig_bbp05_down_2, show_bbp0_up_2, rsig_bbp0_up_2, show_bbp0_down_2, rsig_bbp0_down_2, show_cci_bA_2, rsig_cci_bA_2, show_cci_bB_2, rsig_cci_bB_2, show_cci_bC_2, rsig_cci_bC_2, show_bbp_bA_2, rsig_bbp_bA_2, show_bbp_bB_2, rsig_bbp_bB_2, show_bbp_bC_2, rsig_bbp_bC_2)
+		bull_value := 0
+
+	if f_arrow_reset_logic(bear_value, reset_bbp_A_event, reset_bbp_B_state, reset_bbp_C_event, reset_bb_region, op1, op2, op3, op4, op5, op6, show_cci100_up, rsig_cci100_up, show_cci100_down, rsig_cci100_down, show_cci0_up, rsig_cci0_up, show_cci0_down, rsig_cci0_down, show_cci_100_up, rsig_cci_100_up, show_cci_100_down, rsig_cci_100_down, show_bbp1_up, rsig_bbp1_up, show_bbp1_down, rsig_bbp1_down, show_bbp05_up, rsig_bbp05_up, show_bbp05_down, rsig_bbp05_down, show_bbp0_up, rsig_bbp0_up, show_bbp0_down, rsig_bbp0_down, show_cci_bA, rsig_cci_bA, show_cci_bB, rsig_cci_bB, show_cci_bC, rsig_cci_bC, show_bbp_bA, rsig_bbp_bA, show_bbp_bB, rsig_bbp_bB, show_bbp_bC, rsig_bbp_bC, reset_bbp_A_event_2, reset_bbp_B_state_2, reset_bbp_C_event_2, reset_bb_region_2, op1_2, op2_2, op3_2, op4_2, op5_2, op6_2, show_cci100_up_2, rsig_cci100_up_2, show_cci100_down_2, rsig_cci100_down_2, show_cci0_up_2, rsig_cci0_up_2, show_cci0_down_2, rsig_cci0_down_2, show_cci_100_up_2, rsig_cci_100_up_2, show_cci_100_down_2, rsig_cci_100_down_2, show_bbp1_up_2, rsig_bbp1_up_2, show_bbp1_down_2, rsig_bbp1_down_2, show_bbp05_up_2, rsig_bbp05_up_2, show_bbp05_down_2, rsig_bbp05_down_2, show_bbp0_up_2, rsig_bbp0_up_2, show_bbp0_down_2, rsig_bbp0_down_2, show_cci_bA_2, rsig_cci_bA_2, show_cci_bB_2, rsig_cci_bB_2, show_cci_bC_2, rsig_cci_bC_2, show_bbp_bA_2, rsig_bbp_bA_2, show_bbp_bB_2, rsig_bbp_bB_2, show_bbp_bC_2, rsig_bbp_bC_2)
+		bear_value := 0
+
+	[bull_value, bear_value]
+
+
+f_arrow2_signal(bbp_val, cci_val, maxar, minar, high, low, reset_bbp_A_event, reset_bbp_B_state, reset_bbp_C_event, reset_bb_region, op1, op2, op3, op4, op5, op6, show_cci100_up, show_cci100_down, show_cci0_up, show_cci0_down, show_cci_100_up, show_cci_100_down, show_bbp1_up, show_bbp1_down, show_bbp05_up, show_bbp05_down, show_bbp0_up, show_bbp0_down, show_cci_bA, show_cci_bB, show_cci_bC, show_bbp_bA, show_bbp_bB, show_bbp_bC, rsig_cci100_up, rsig_cci100_down, rsig_cci0_up, rsig_cci0_down, rsig_cci_100_up, rsig_cci_100_down, rsig_bbp1_up, rsig_bbp1_down, rsig_bbp05_up, rsig_bbp05_down, rsig_bbp0_up, rsig_bbp0_down, rsig_cci_bA, rsig_cci_bB, rsig_cci_bC, rsig_bbp_bA, rsig_bbp_bB, rsig_bbp_bC, reset_bbp_A_event_2, reset_bbp_B_state_2, reset_bbp_C_event_2, reset_bb_region_2, op1_2, op2_2, op3_2, op4_2, op5_2, op6_2, show_cci100_up_2, show_cci100_down_2, show_cci0_up_2, show_cci0_down_2, show_cci_100_up_2, show_cci_100_down_2, show_bbp1_up_2, show_bbp1_down_2, show_bbp05_up_2, show_bbp05_down_2, show_bbp0_up_2, show_bbp0_down_2, show_cci_bA_2, show_cci_bB_2, show_cci_bC_2, show_bbp_bA_2, show_bbp_bB_2, show_bbp_bC_2, rsig_cci100_up_2, rsig_cci100_down_2, rsig_cci0_up_2, rsig_cci0_down_2, rsig_cci_100_up_2, rsig_cci_100_down_2, rsig_bbp1_up_2, rsig_bbp1_down_2, rsig_bbp05_up_2, rsig_bbp05_down_2, rsig_bbp0_up_2, rsig_bbp0_down_2, rsig_cci_bA_2, rsig_cci_bB_2, rsig_cci_bC_2, rsig_bbp_bA_2, rsig_bbp_bB_2, rsig_bbp_bC_2) =>
+    // persistent "active" state so arrow can persist across bars until continuation/reset decides otherwise
+    var int bull_value = 0
+    var int bear_value = 0
+	var int encircled_bull_value = 0
+	var int encircled_bear_value = 0
+	var bool case2_active = false
+	var pseudo_maxar = maxar, var pseudo_minar = minar
+
+	bool bbp_between = bbp_val > 0 and bbp_val < 1
+	bool cci_between = cci_val > -100 and cci_val < 100
+	bool cci_above = cci_val > 100
+	bool cci_below = cci_val < -100
+	// bool bbp_crossunder_A = bbp_crossunder_A
+	bool bbp_crossover_0 = bbp_crossover_C
+
+	// [bbp_A_event, ref_bbp_a, _, _] = f_bbp_breakout_logic(bbp_val, 1.0, maxar, minar, high, low)
+	// [bbp_C_event, ref_bbp_c, _, _] = f_bbp_breakout_logic(bbp_val, 0.0, maxar, minar, high, low)
+	// [cci_A_event, ref_cci_a, _, _] = f_cci_breakout_logic(cci_val, 100, maxar, minar, high, low)
+	// [cci_C_event, ref_cci_c, _, _] = f_cci_breakout_logic(cci_val, -100, maxar, minar, high, low)
+
+
+	if cci_between
+		case2_active := false, bull_value := 0, bear_value := 0
+
+    if bbp_crossunder_A and cci_above
+		pseudo_maxar := maxar, case2_active := true
+
+	if bbp_crossover_0 and cci_below
+		pseudo_minar := minar, case2_active := true
+
+	if case2_active and cci_above and high > pseudo_maxar
+		bull_value := 1
+		case2_active := false
+		f_set_label_info(1, bar_index, high, "A2B", tf_ = timeframe.period)
+	if case2_active and cci_below and low < pseudo_minar
+		bear_value := -1
+		case2_active := false
+		f_set_label_info(1, bar_index, high, "A2S", tf_ = timeframe.period)
+
+	if not bbp_between
+		case2_active := false
+
+	if f_arrow_reset_logic(bull_value, reset_bbp_A_event, reset_bbp_B_state, reset_bbp_C_event, reset_bb_region, op1, op2, op3, op4, op5, op6, show_cci100_up, rsig_cci100_up, show_cci100_down, rsig_cci100_down, show_cci0_up, rsig_cci0_up, show_cci0_down, rsig_cci0_down, show_cci_100_up, rsig_cci_100_up, show_cci_100_down, rsig_cci_100_down, show_bbp1_up, rsig_bbp1_up, show_bbp1_down, rsig_bbp1_down, show_bbp05_up, rsig_bbp05_up, show_bbp05_down, rsig_bbp05_down, show_bbp0_up, rsig_bbp0_up, show_bbp0_down, rsig_bbp0_down, show_cci_bA, rsig_cci_bA, show_cci_bB, rsig_cci_bB, show_cci_bC, rsig_cci_bC, show_bbp_bA, rsig_bbp_bA, show_bbp_bB, rsig_bbp_bB, show_bbp_bC, rsig_bbp_bC, reset_bbp_A_event_2, reset_bbp_B_state_2, reset_bbp_C_event_2, reset_bb_region_2, op1_2, op2_2, op3_2, op4_2, op5_2, op6_2, show_cci100_up_2, rsig_cci100_up_2, show_cci100_down_2, rsig_cci100_down_2, show_cci0_up_2, rsig_cci0_up_2, show_cci0_down_2, rsig_cci0_down_2, show_cci_100_up_2, rsig_cci_100_up_2, show_cci_100_down_2, rsig_cci_100_down_2, show_bbp1_up_2, rsig_bbp1_up_2, show_bbp1_down_2, rsig_bbp1_down_2, show_bbp05_up_2, rsig_bbp05_up_2, show_bbp05_down_2, rsig_bbp05_down_2, show_bbp0_up_2, rsig_bbp0_up_2, show_bbp0_down_2, rsig_bbp0_down_2, show_cci_bA_2, rsig_cci_bA_2, show_cci_bB_2, rsig_cci_bB_2, show_cci_bC_2, rsig_cci_bC_2, show_bbp_bA_2, rsig_bbp_bA_2, show_bbp_bB_2, rsig_bbp_bB_2, show_bbp_bC_2, rsig_bbp_bC_2)
+		bull_value := 0
+	if f_arrow_reset_logic(bear_value, reset_bbp_A_event, reset_bbp_B_state, reset_bbp_C_event, reset_bb_region, op1, op2, op3, op4, op5, op6, show_cci100_up, rsig_cci100_up, show_cci100_down, rsig_cci100_down, show_cci0_up, rsig_cci0_up, show_cci0_down, rsig_cci0_down, show_cci_100_up, rsig_cci_100_up, show_cci_100_down, rsig_cci_100_down, show_bbp1_up, rsig_bbp1_up, show_bbp1_down, rsig_bbp1_down, show_bbp05_up, rsig_bbp05_up, show_bbp05_down, rsig_bbp05_down, show_bbp0_up, rsig_bbp0_up, show_bbp0_down, rsig_bbp0_down, show_cci_bA, rsig_cci_bA, show_cci_bB, rsig_cci_bB, show_cci_bC, rsig_cci_bC, show_bbp_bA, rsig_bbp_bA, show_bbp_bB, rsig_bbp_bB, show_bbp_bC, rsig_bbp_bC, reset_bbp_A_event_2, reset_bbp_B_state_2, reset_bbp_C_event_2, reset_bb_region_2, op1_2, op2_2, op3_2, op4_2, op5_2, op6_2, show_cci100_up_2, rsig_cci100_up_2, show_cci100_down_2, rsig_cci100_down_2, show_cci0_up_2, rsig_cci0_up_2, show_cci0_down_2, rsig_cci0_down_2, show_cci_100_up_2, rsig_cci_100_up_2, show_cci_100_down_2, rsig_cci_100_down_2, show_bbp1_up_2, rsig_bbp1_up_2, show_bbp1_down_2, rsig_bbp1_down_2, show_bbp05_up_2, rsig_bbp05_up_2, show_bbp05_down_2, rsig_bbp05_down_2, show_bbp0_up_2, rsig_bbp0_up_2, show_bbp0_down_2, rsig_bbp0_down_2, show_cci_bA_2, rsig_cci_bA_2, show_cci_bB_2, rsig_cci_bB_2, show_cci_bC_2, rsig_cci_bC_2, show_bbp_bA_2, rsig_bbp_bA_2, show_bbp_bB_2, rsig_bbp_bB_2, show_bbp_bC_2, rsig_bbp_bC_2)
+		bear_value := 0
+
+
+    [bull_value, bear_value, encircled_bull_value, encircled_bear_value]
+
+f_arrow3_signal(bbp_val, cci_val, maxar, minar, high, low, reset_bbp_A_event, reset_bbp_B_state, reset_bbp_C_event, reset_bb_region, op1, op2, op3, op4, op5, op6, show_cci100_up, show_cci100_down, show_cci0_up, show_cci0_down, show_cci_100_up, show_cci_100_down, show_bbp1_up, show_bbp1_down, show_bbp05_up, show_bbp05_down, show_bbp0_up, show_bbp0_down, show_cci_bA, show_cci_bB, show_cci_bC, show_bbp_bA, show_bbp_bB, show_bbp_bC, rsig_cci100_up, rsig_cci100_down, rsig_cci0_up, rsig_cci0_down, rsig_cci_100_up, rsig_cci_100_down, rsig_bbp1_up, rsig_bbp1_down, rsig_bbp05_up, rsig_bbp05_down, rsig_bbp0_up, rsig_bbp0_down, rsig_cci_bA, rsig_cci_bB, rsig_cci_bC, rsig_bbp_bA, rsig_bbp_bB, rsig_bbp_bC, reset_bbp_A_event_2, reset_bbp_B_state_2, reset_bbp_C_event_2, reset_bb_region_2, op1_2, op2_2, op3_2, op4_2, op5_2, op6_2, show_cci100_up_2, show_cci100_down_2, show_cci0_up_2, show_cci0_down_2, show_cci_100_up_2, show_cci_100_down_2, show_bbp1_up_2, show_bbp1_down_2, show_bbp05_up_2, show_bbp05_down_2, show_bbp0_up_2, show_bbp0_down_2, show_cci_bA_2, show_cci_bB_2, show_cci_bC_2, show_bbp_bA_2, show_bbp_bB_2, show_bbp_bC_2, rsig_cci100_up_2, rsig_cci100_down_2, rsig_cci0_up_2, rsig_cci0_down_2, rsig_cci_100_up_2, rsig_cci_100_down_2, rsig_bbp1_up_2, rsig_bbp1_down_2, rsig_bbp05_up_2, rsig_bbp05_down_2, rsig_bbp0_up_2, rsig_bbp0_down_2, rsig_cci_bA_2, rsig_cci_bB_2, rsig_cci_bC_2, rsig_bbp_bA_2, rsig_bbp_bB_2, rsig_bbp_bC_2) =>
+    // persistent "active" state so arrow can persist across bars until continuation/reset decides otherwise
+    var int bull_value = 0
+    var int bear_value = 0
+	var int encircled_bull_value = 0
+	var int encircled_bear_value = 0
+	var bool case2_active = false, var bool case3_active_bull = false, var bool case3_active_bear = false
+	var pseudo_maxar = maxar, var pseudo_minar = minar
+
+	bool bbp_between = bbp_val > 0 and bbp_val < 1
+	bool cci_between = cci_val > -100 and cci_val < 100
+	bool cci_above = cci_val > 100
+	bool cci_below = cci_val < -100
+
+	bool bbp_crossover_0 = bbp_crossover_C
+
+	if cci_between
+		case2_active := false, case3_active_bull := false, case3_active_bear := false, bull_value := 0, bear_value := 0
+
+    if bbp_crossunder_A and cci_above
+		case2_active := true
+
+	if bbp_crossover_0 and cci_below
+		case2_active := true
+
+	if case2_active and bbp_A_event[1] == -1
+		case2_active := false, case3_active_bull := true, pseudo_maxar := maxar
+	if case2_active and bbp_C_event[1] == 1
+		case2_active := false, case3_active_bear := true, pseudo_minar := minar
+	if case3_active_bull and cci_above and high > pseudo_maxar
+		bull_value := 1
+		f_set_label_info(1, bar_index, high, "A3B", tf_ = timeframe.period)
+		case3_active_bull := false, case2_active := false, case3_active_bear := false
+	if case3_active_bear and cci_below and low < pseudo_minar
+		bear_value := -1
+		f_set_label_info(1, bar_index, high, "A3S", tf_ = timeframe.period)
+		case3_active_bull := false, case2_active := false, case3_active_bear := false
+
+	if not bbp_between
+		case2_active := false, case3_active_bull := false, case3_active_bear := false
+
+	if f_arrow_reset_logic(bull_value, reset_bbp_A_event, reset_bbp_B_state, reset_bbp_C_event, reset_bb_region, op1, op2, op3, op4, op5, op6, show_cci100_up, rsig_cci100_up, show_cci100_down, rsig_cci100_down, show_cci0_up, rsig_cci0_up, show_cci0_down, rsig_cci0_down, show_cci_100_up, rsig_cci_100_up, show_cci_100_down, rsig_cci_100_down, show_bbp1_up, rsig_bbp1_up, show_bbp1_down, rsig_bbp1_down, show_bbp05_up, rsig_bbp05_up, show_bbp05_down, rsig_bbp05_down, show_bbp0_up, rsig_bbp0_up, show_bbp0_down, rsig_bbp0_down, show_cci_bA, rsig_cci_bA, show_cci_bB, rsig_cci_bB, show_cci_bC, rsig_cci_bC, show_bbp_bA, rsig_bbp_bA, show_bbp_bB, rsig_bbp_bB, show_bbp_bC, rsig_bbp_bC, reset_bbp_A_event_2, reset_bbp_B_state_2, reset_bbp_C_event_2, reset_bb_region_2, op1_2, op2_2, op3_2, op4_2, op5_2, op6_2, show_cci100_up_2, rsig_cci100_up_2, show_cci100_down_2, rsig_cci100_down_2, show_cci0_up_2, rsig_cci0_up_2, show_cci0_down_2, rsig_cci0_down_2, show_cci_100_up_2, rsig_cci_100_up_2, show_cci_100_down_2, rsig_cci_100_down_2, show_bbp1_up_2, rsig_bbp1_up_2, show_bbp1_down_2, rsig_bbp1_down_2, show_bbp05_up_2, rsig_bbp05_up_2, show_bbp05_down_2, rsig_bbp05_down_2, show_bbp0_up_2, rsig_bbp0_up_2, show_bbp0_down_2, rsig_bbp0_down_2, show_cci_bA_2, rsig_cci_bA_2, show_cci_bB_2, rsig_cci_bB_2, show_cci_bC_2, rsig_cci_bC_2, show_bbp_bA_2, rsig_bbp_bA_2, show_bbp_bB_2, rsig_bbp_bB_2, show_bbp_bC_2, rsig_bbp_bC_2)
+		bull_value := 0
+	if f_arrow_reset_logic(bear_value, reset_bbp_A_event, reset_bbp_B_state, reset_bbp_C_event, reset_bb_region, op1, op2, op3, op4, op5, op6, show_cci100_up, rsig_cci100_up, show_cci100_down, rsig_cci100_down, show_cci0_up, rsig_cci0_up, show_cci0_down, rsig_cci0_down, show_cci_100_up, rsig_cci_100_up, show_cci_100_down, rsig_cci_100_down, show_bbp1_up, rsig_bbp1_up, show_bbp1_down, rsig_bbp1_down, show_bbp05_up, rsig_bbp05_up, show_bbp05_down, rsig_bbp05_down, show_bbp0_up, rsig_bbp0_up, show_bbp0_down, rsig_bbp0_down, show_cci_bA, rsig_cci_bA, show_cci_bB, rsig_cci_bB, show_cci_bC, rsig_cci_bC, show_bbp_bA, rsig_bbp_bA, show_bbp_bB, rsig_bbp_bB, show_bbp_bC, rsig_bbp_bC, reset_bbp_A_event_2, reset_bbp_B_state_2, reset_bbp_C_event_2, reset_bb_region_2, op1_2, op2_2, op3_2, op4_2, op5_2, op6_2, show_cci100_up_2, rsig_cci100_up_2, show_cci100_down_2, rsig_cci100_down_2, show_cci0_up_2, rsig_cci0_up_2, show_cci0_down_2, rsig_cci0_down_2, show_cci_100_up_2, rsig_cci_100_up_2, show_cci_100_down_2, rsig_cci_100_down_2, show_bbp1_up_2, rsig_bbp1_up_2, show_bbp1_down_2, rsig_bbp1_down_2, show_bbp05_up_2, rsig_bbp05_up_2, show_bbp05_down_2, rsig_bbp05_down_2, show_bbp0_up_2, rsig_bbp0_up_2, show_bbp0_down_2, rsig_bbp0_down_2, show_cci_bA_2, rsig_cci_bA_2, show_cci_bB_2, rsig_cci_bB_2, show_cci_bC_2, rsig_cci_bC_2, show_bbp_bA_2, rsig_bbp_bA_2, show_bbp_bB_2, rsig_bbp_bB_2, show_bbp_bC_2, rsig_bbp_bC_2)
+		bear_value := 0
+
+
+    [bull_value, bear_value]
+
+
+f_arrow4_signal(bbp_val, cci_val, maxar, minar, high, low, reset_bbp_A_event, reset_bbp_B_state, reset_bbp_C_event, reset_bb_region, op1, op2, op3, op4, op5, op6, show_cci100_up, show_cci100_down, show_cci0_up, show_cci0_down, show_cci_100_up, show_cci_100_down, show_bbp1_up, show_bbp1_down, show_bbp05_up, show_bbp05_down, show_bbp0_up, show_bbp0_down, show_cci_bA, show_cci_bB, show_cci_bC, show_bbp_bA, show_bbp_bB, show_bbp_bC, rsig_cci100_up, rsig_cci100_down, rsig_cci0_up, rsig_cci0_down, rsig_cci_100_up, rsig_cci_100_down, rsig_bbp1_up, rsig_bbp1_down, rsig_bbp05_up, rsig_bbp05_down, rsig_bbp0_up, rsig_bbp0_down, rsig_cci_bA, rsig_cci_bB, rsig_cci_bC, rsig_bbp_bA, rsig_bbp_bB, rsig_bbp_bC, reset_bbp_A_event_2, reset_bbp_B_state_2, reset_bbp_C_event_2, reset_bb_region_2, op1_2, op2_2, op3_2, op4_2, op5_2, op6_2, show_cci100_up_2, show_cci100_down_2, show_cci0_up_2, show_cci0_down_2, show_cci_100_up_2, show_cci_100_down_2, show_bbp1_up_2, show_bbp1_down_2, show_bbp05_up_2, show_bbp05_down_2, show_bbp0_up_2, show_bbp0_down_2, show_cci_bA_2, show_cci_bB_2, show_cci_bC_2, show_bbp_bA_2, show_bbp_bB_2, show_bbp_bC_2, rsig_cci100_up_2, rsig_cci100_down_2, rsig_cci0_up_2, rsig_cci0_down_2, rsig_cci_100_up_2, rsig_cci_100_down_2, rsig_bbp1_up_2, rsig_bbp1_down_2, rsig_bbp05_up_2, rsig_bbp05_down_2, rsig_bbp0_up_2, rsig_bbp0_down_2, rsig_cci_bA_2, rsig_cci_bB_2, rsig_cci_bC_2, rsig_bbp_bA_2, rsig_bbp_bB_2, rsig_bbp_bC_2) =>
+	var int bull_value = 0, var int bear_value = 0
+
+	var false_bull_active = false, var false_bear_active = false, var broken_A = false, var broken_C = false
+
+	// [cci_A_event_local, ref_cci_A_local, _, _] = f_cci_breakout_logic(cci_val, 100, maxar, minar, high, low)
+	// [cci_C_event_local, ref_cci_C_local, _, _] = f_cci_breakout_logic(cci_val, -100, maxar, minar, high, low)
+
+	bool bbp_between = bbp_val > 0 and bbp_val < 1
+	bool cci_between = cci_val > -100 and cci_val < 100
+	bool cci_above = cci_val > 100
+	bool cci_below = cci_val < -100
+	var bool valida = true, var bool validc = true
+	// if cci_between or not bbp_between
+	// 	false_bull_active := false, false_bear_active := false, bull_value := 0, bear_value := 0
+
+	if cci_crossover_A
+		false_bear_active := false
+	if cci_crossunder_C
+		false_bull_active := false
+
+	if cci_crossunder_A
+		valida := true, validc := false
+	if cci_crossover_C
+		valida := false, validc := true
+
+
+	if not bbp_between
+		false_bull_active := false, false_bear_active := false, broken_A := false, broken_C := false
+
+	if (cci_A_event == -1 and bbp_A_event == -1) and not false_bull_active
+		false_bull_active := true
+		f_set_label_info(1, bar_index, high, "◯", color_ = color.red)
+	else if cci_A_event == -1 and last_3_regions_cci == "BAB" and not false_bull_active
+		if last_3_regions_bbp == "BAB"
+			f_set_label_info(1, bar_index, high, "⬤", color_ = color.red)
+		else
+			f_set_label_info(1, bar_index, high, "▼", color_ = color.red)
+
+	if not broken_A and valida and ref_cci_A > ref_bbp_A and not false_bull_active and cci_between
+		false_bull_active := true
+		f_set_label_info(1, bar_index, high, "◯", color_ = color.red)
+
+
+	if last_3_regions_cci == "BAB" and last_3_regions_bbp == "BAB" and not false_bull_active and valida and cci_A_event == -1
+		valida := false
+		f_set_label_info(1, bar_index, high, "⬤", color_ = color.red)
+
+
+	if bbp_A_event == -1 and cci_A_event != -1
+		broken_A := true
+
+
+	if (cci_C_event == 1 and bbp_C_event == 1) and not false_bear_active
+		false_bear_active := true
+		f_set_label_info(-1, bar_index, high, "◯", color_ = color.green)
+	else if cci_C_event == 1 and last_3_regions_cci == "BCB" and not false_bear_active
+		if last_3_regions_bbp == "BCB"
+			f_set_label_info(-1, bar_index, high, "⬤", color_ = color.green)
+		else
+			f_set_label_info(-1, bar_index, high, "▲", color_ = color.green)
+
+	if not broken_C and validc and ref_cci_C < ref_bbp_C and not false_bear_active and cci_between
+		false_bear_active := true
+		f_set_label_info(-1, bar_index, high, "◯", color_ = color.green)
+
+	if last_3_regions_cci == "BCB" and last_3_regions_bbp == "BCB" and not false_bear_active and validc and cci_C_event == 1
+		validc := false
+		f_set_label_info(-1, bar_index, high, "⬤", color_ = color.green)
+
+	if bbp_C_event == 1 and cci_C_event != 1
+		broken_C := true
+
+	if false_bull_active and cci_A_event == 1
+		bull_value := 1
+		false_bull_active := false
+		f_set_label_info(1, bar_index, high, "A4B", tf_ = timeframe.period)
+
+	if false_bear_active and cci_C_event == -1
+		bear_value := -1
+		false_bear_active := false
+		f_set_label_info(1, bar_index, high, "A4S", tf_ = timeframe.period)
+
+
+	if f_arrow_reset_logic(bull_value, reset_bbp_A_event, reset_bbp_B_state, reset_bbp_C_event, reset_bb_region, op1, op2, op3, op4, op5, op6, show_cci100_up, rsig_cci100_up, show_cci100_down, rsig_cci100_down, show_cci0_up, rsig_cci0_up, show_cci0_down, rsig_cci0_down, show_cci_100_up, rsig_cci_100_up, show_cci_100_down, rsig_cci_100_down, show_bbp1_up, rsig_bbp1_up, show_bbp1_down, rsig_bbp1_down, show_bbp05_up, rsig_bbp05_up, show_bbp05_down, rsig_bbp05_down, show_bbp0_up, rsig_bbp0_up, show_bbp0_down, rsig_bbp0_down, show_cci_bA, rsig_cci_bA, show_cci_bB, rsig_cci_bB, show_cci_bC, rsig_cci_bC, show_bbp_bA, rsig_bbp_bA, show_bbp_bB, rsig_bbp_bB, show_bbp_bC, rsig_bbp_bC, reset_bbp_A_event_2, reset_bbp_B_state_2, reset_bbp_C_event_2, reset_bb_region_2, op1_2, op2_2, op3_2, op4_2, op5_2, op6_2, show_cci100_up_2, rsig_cci100_up_2, show_cci100_down_2, rsig_cci100_down_2, show_cci0_up_2, rsig_cci0_up_2, show_cci0_down_2, rsig_cci0_down_2, show_cci_100_up_2, rsig_cci_100_up_2, show_cci_100_down_2, rsig_cci_100_down_2, show_bbp1_up_2, rsig_bbp1_up_2, show_bbp1_down_2, rsig_bbp1_down_2, show_bbp05_up_2, rsig_bbp05_up_2, show_bbp05_down_2, rsig_bbp05_down_2, show_bbp0_up_2, rsig_bbp0_up_2, show_bbp0_down_2, rsig_bbp0_down_2, show_cci_bA_2, rsig_cci_bA_2, show_cci_bB_2, rsig_cci_bB_2, show_cci_bC_2, rsig_cci_bC_2, show_bbp_bA_2, rsig_bbp_bA_2, show_bbp_bB_2, rsig_bbp_bB_2, show_bbp_bC_2, rsig_bbp_bC_2)
+		bull_value := 0
+	if f_arrow_reset_logic(bear_value, reset_bbp_A_event, reset_bbp_B_state, reset_bbp_C_event, reset_bb_region, op1, op2, op3, op4, op5, op6, show_cci100_up, rsig_cci100_up, show_cci100_down, rsig_cci100_down, show_cci0_up, rsig_cci0_up, show_cci0_down, rsig_cci0_down, show_cci_100_up, rsig_cci_100_up, show_cci_100_down, rsig_cci_100_down, show_bbp1_up, rsig_bbp1_up, show_bbp1_down, rsig_bbp1_down, show_bbp05_up, rsig_bbp05_up, show_bbp05_down, rsig_bbp05_down, show_bbp0_up, rsig_bbp0_up, show_bbp0_down, rsig_bbp0_down, show_cci_bA, rsig_cci_bA, show_cci_bB, rsig_cci_bB, show_cci_bC, rsig_cci_bC, show_bbp_bA, rsig_bbp_bA, show_bbp_bB, rsig_bbp_bB, show_bbp_bC, rsig_bbp_bC, reset_bbp_A_event_2, reset_bbp_B_state_2, reset_bbp_C_event_2, reset_bb_region_2, op1_2, op2_2, op3_2, op4_2, op5_2, op6_2, show_cci100_up_2, rsig_cci100_up_2, show_cci100_down_2, rsig_cci100_down_2, show_cci0_up_2, rsig_cci0_up_2, show_cci0_down_2, rsig_cci0_down_2, show_cci_100_up_2, rsig_cci_100_up_2, show_cci_100_down_2, rsig_cci_100_down_2, show_bbp1_up_2, rsig_bbp1_up_2, show_bbp1_down_2, rsig_bbp1_down_2, show_bbp05_up_2, rsig_bbp05_up_2, show_bbp05_down_2, rsig_bbp05_down_2, show_bbp0_up_2, rsig_bbp0_up_2, show_bbp0_down_2, rsig_bbp0_down_2, show_cci_bA_2, rsig_cci_bA_2, show_cci_bB_2, rsig_cci_bB_2, show_cci_bC_2, rsig_cci_bC_2, show_bbp_bA_2, rsig_bbp_bA_2, show_bbp_bB_2, rsig_bbp_bB_2, show_bbp_bC_2, rsig_bbp_bC_2)
+		bear_value := 0
+	[bull_value, bear_value]
+
+
+f_arrow5_signal(bbp_val, cci_val, maxar, minar, high, low, reset_bbp_A_event, reset_bbp_B_state, reset_bbp_C_event, reset_bb_region, op1, op2, op3, op4, op5, op6, show_cci100_up, show_cci100_down, show_cci0_up, show_cci0_down, show_cci_100_up, show_cci_100_down, show_bbp1_up, show_bbp1_down, show_bbp05_up, show_bbp05_down, show_bbp0_up, show_bbp0_down, show_cci_bA, show_cci_bB, show_cci_bC, show_bbp_bA, show_bbp_bB, show_bbp_bC, rsig_cci100_up, rsig_cci100_down, rsig_cci0_up, rsig_cci0_down, rsig_cci_100_up, rsig_cci_100_down, rsig_bbp1_up, rsig_bbp1_down, rsig_bbp05_up, rsig_bbp05_down, rsig_bbp0_up, rsig_bbp0_down, rsig_cci_bA, rsig_cci_bB, rsig_cci_bC, rsig_bbp_bA, rsig_bbp_bB, rsig_bbp_bC, reset_bbp_A_event_2, reset_bbp_B_state_2, reset_bbp_C_event_2, reset_bb_region_2, op1_2, op2_2, op3_2, op4_2, op5_2, op6_2, show_cci100_up_2, show_cci100_down_2, show_cci0_up_2, show_cci0_down_2, show_cci_100_up_2, show_cci_100_down_2, show_bbp1_up_2, show_bbp1_down_2, show_bbp05_up_2, show_bbp05_down_2, show_bbp0_up_2, show_bbp0_down_2, show_cci_bA_2, show_cci_bB_2, show_cci_bC_2, show_bbp_bA_2, show_bbp_bB_2, show_bbp_bC_2, rsig_cci100_up_2, rsig_cci100_down_2, rsig_cci0_up_2, rsig_cci0_down_2, rsig_cci_100_up_2, rsig_cci_100_down_2, rsig_bbp1_up_2, rsig_bbp1_down_2, rsig_bbp05_up_2, rsig_bbp05_down_2, rsig_bbp0_up_2, rsig_bbp0_down_2, rsig_cci_bA_2, rsig_cci_bB_2, rsig_cci_bC_2, rsig_bbp_bA_2, rsig_bbp_bB_2, rsig_bbp_bC_2) =>
+	var int bull_value = 0, var int bear_value = 0
+	var bool setup = false
+
+	bool bbp_between = bbp_val > 0 and bbp_val < 1
+
+	if not bbp_between
+		setup := false
+
+	if bbp_A_event == -1 and cci_A_event != -1 and last_3_regions_cci == "BAB"
+		setup := true
+
+	if cci_A_event == -1
+		setup := false
+
+	if setup and cci_A_event == 1 and last_3_regions_cci == "ABA"
+		bull_value := 1
+		setup := false
+		f_set_label_info(1, bar_index, high, "A5B", tf_ = timeframe.period)
+
+	if bbp_C_event == 1 and cci_C_event != 1 and last_3_regions_cci == "BCB"
+		setup := true
+
+	if cci_C_event == 1
+		setup := false
+
+	if setup and cci_C_event == -1 and last_3_regions_cci == "CBC"
+		bear_value := -1
+		setup := false
+		f_set_label_info(1, bar_index, high, "A5S", tf_ = timeframe.period)
+
+	if f_arrow_reset_logic(bull_value, reset_bbp_A_event, reset_bbp_B_state, reset_bbp_C_event, reset_bb_region, op1, op2, op3, op4, op5, op6, show_cci100_up, rsig_cci100_up, show_cci100_down, rsig_cci100_down, show_cci0_up, rsig_cci0_up, show_cci0_down, rsig_cci0_down, show_cci_100_up, rsig_cci_100_up, show_cci_100_down, rsig_cci_100_down, show_bbp1_up, rsig_bbp1_up, show_bbp1_down, rsig_bbp1_down, show_bbp05_up, rsig_bbp05_up, show_bbp05_down, rsig_bbp05_down, show_bbp0_up, rsig_bbp0_up, show_bbp0_down, rsig_bbp0_down, show_cci_bA, rsig_cci_bA, show_cci_bB, rsig_cci_bB, show_cci_bC, rsig_cci_bC, show_bbp_bA, rsig_bbp_bA, show_bbp_bB, rsig_bbp_bB, show_bbp_bC, rsig_bbp_bC, reset_bbp_A_event_2, reset_bbp_B_state_2, reset_bbp_C_event_2, reset_bb_region_2, op1_2, op2_2, op3_2, op4_2, op5_2, op6_2, show_cci100_up_2, rsig_cci100_up_2, show_cci100_down_2, rsig_cci100_down_2, show_cci0_up_2, rsig_cci0_up_2, show_cci0_down_2, rsig_cci0_down_2, show_cci_100_up_2, rsig_cci_100_up_2, show_cci_100_down_2, rsig_cci_100_down_2, show_bbp1_up_2, rsig_bbp1_up_2, show_bbp1_down_2, rsig_bbp1_down_2, show_bbp05_up_2, rsig_bbp05_up_2, show_bbp05_down_2, rsig_bbp05_down_2, show_bbp0_up_2, rsig_bbp0_up_2, show_bbp0_down_2, rsig_bbp0_down_2, show_cci_bA_2, rsig_cci_bA_2, show_cci_bB_2, rsig_cci_bB_2, show_cci_bC_2, rsig_cci_bC_2, show_bbp_bA_2, rsig_bbp_bA_2, show_bbp_bB_2, rsig_bbp_bB_2, show_bbp_bC_2, rsig_bbp_bC_2)
+		bull_value := 0
+	if f_arrow_reset_logic(bear_value, reset_bbp_A_event, reset_bbp_B_state, reset_bbp_C_event, reset_bb_region, op1, op2, op3, op4, op5, op6, show_cci100_up, rsig_cci100_up, show_cci100_down, rsig_cci100_down, show_cci0_up, rsig_cci0_up, show_cci0_down, rsig_cci0_down, show_cci_100_up, rsig_cci_100_up, show_cci_100_down, rsig_cci_100_down, show_bbp1_up, rsig_bbp1_up, show_bbp1_down, rsig_bbp1_down, show_bbp05_up, rsig_bbp05_up, show_bbp05_down, rsig_bbp05_down, show_bbp0_up, rsig_bbp0_up, show_bbp0_down, rsig_bbp0_down, show_cci_bA, rsig_cci_bA, show_cci_bB, rsig_cci_bB, show_cci_bC, rsig_cci_bC, show_bbp_bA, rsig_bbp_bA, show_bbp_bB, rsig_bbp_bB, show_bbp_bC, rsig_bbp_bC, reset_bbp_A_event_2, reset_bbp_B_state_2, reset_bbp_C_event_2, reset_bb_region_2, op1_2, op2_2, op3_2, op4_2, op5_2, op6_2, show_cci100_up_2, rsig_cci100_up_2, show_cci100_down_2, rsig_cci100_down_2, show_cci0_up_2, rsig_cci0_up_2, show_cci0_down_2, rsig_cci0_down_2, show_cci_100_up_2, rsig_cci_100_up_2, show_cci_100_down_2, rsig_cci_100_down_2, show_bbp1_up_2, rsig_bbp1_up_2, show_bbp1_down_2, rsig_bbp1_down_2, show_bbp05_up_2, rsig_bbp05_up_2, show_bbp05_down_2, rsig_bbp05_down_2, show_bbp0_up_2, rsig_bbp0_up_2, show_bbp0_down_2, rsig_bbp0_down_2, show_cci_bA_2, rsig_cci_bA_2, show_cci_bB_2, rsig_cci_bB_2, show_cci_bC_2, rsig_cci_bC_2, show_bbp_bA_2, rsig_bbp_bA_2, show_bbp_bB_2, rsig_bbp_bB_2, show_bbp_bC_2, rsig_bbp_bC_2)
+		bear_value := 0
+	[bull_value, bear_value]
+
+f_simul_breakout(bbp_A_event_val, cci_A_event_val, bbp_C_event_val, cci_C_event_val, reset_bbp_A_event, reset_bbp_B_state, reset_bbp_C_event, reset_bb_region, op1, op2, op3, op4, op5, op6, show_cci100_up, show_cci100_down, show_cci0_up, show_cci0_down, show_cci_100_up, show_cci_100_down, show_bbp1_up, show_bbp1_down, show_bbp05_up, show_bbp05_down, show_bbp0_up, show_bbp0_down, show_cci_bA, show_cci_bB, show_cci_bC, show_bbp_bA, show_bbp_bB, show_bbp_bC, rsig_cci100_up, rsig_cci100_down, rsig_cci0_up, rsig_cci0_down, rsig_cci_100_up, rsig_cci_100_down, rsig_bbp1_up, rsig_bbp1_down, rsig_bbp05_up, rsig_bbp05_down, rsig_bbp0_up, rsig_bbp0_down, rsig_cci_bA, rsig_cci_bB, rsig_cci_bC, rsig_bbp_bA, rsig_bbp_bB, rsig_bbp_bC, reset_bbp_A_event_2, reset_bbp_B_state_2, reset_bbp_C_event_2, reset_bb_region_2, op1_2, op2_2, op3_2, op4_2, op5_2, op6_2, show_cci100_up_2, show_cci100_down_2, show_cci0_up_2, show_cci0_down_2, show_cci_100_up_2, show_cci_100_down_2, show_bbp1_up_2, show_bbp1_down_2, show_bbp05_up_2, show_bbp05_down_2, show_bbp0_up_2, show_bbp0_down_2, show_cci_bA_2, show_cci_bB_2, show_cci_bC_2, show_bbp_bA_2, show_bbp_bB_2, show_bbp_bC_2, rsig_cci100_up_2, rsig_cci100_down_2, rsig_cci0_up_2, rsig_cci0_down_2, rsig_cci_100_up_2, rsig_cci_100_down_2, rsig_bbp1_up_2, rsig_bbp1_down_2, rsig_bbp05_up_2, rsig_bbp05_down_2, rsig_bbp0_up_2, rsig_bbp0_down_2, rsig_cci_bA_2, rsig_cci_bB_2, rsig_cci_bC_2, rsig_bbp_bA_2, rsig_bbp_bB_2, rsig_bbp_bC_2) =>
+	int bull_value = 0
+	int bear_value = 0
+
+	if bbp_A_event == 1 and cci_A_event == 1
+		bull_value := 1
+	if bbp_C_event == -1 and cci_C_event == -1
+		bear_value := -1
+
+	[bull_value, bear_value]
+
+enum MRBState
+	None
+	SetupB
+	SetupS
+	ArmedB
+	ArmedS
+
+f_reversal_signal_bbp(bbp_val, maxar, minar, high, low) =>
+	int bull_value = 0
+	int bear_value = 0
+	var state = MRBState.None
+
+	if bbp_crossover_A
+		state := MRBState.None
+	else if bbp_crossunder_C
+		state := MRBState.None
+
+	if bbp_crossunder_A
+		state := MRBState.SetupS
+	else if bbp_crossover_C
+		state := MRBState.SetupB
+
+	if state == MRBState.SetupB and bbp_crossunder_B
+		state := MRBState.ArmedB
+	else if state == MRBState.SetupS and bbp_crossover_B
+		state := MRBState.ArmedS
+
+	if state == MRBState.ArmedB and bbp_B_event == -1
+		bear_value := -1
+		state := MRBState.None
+	else if state == MRBState.ArmedS and bbp_B_event == 1
+		bull_value := 1
+		state := MRBState.None
+
+	[bull_value, bear_value]
+
+f_reversal_signal_cci(cci_val, maxar, minar, high, low) =>
+	int bull_value = 0
+	int bear_value = 0
+	var state = MRBState.None
+
+	if cci_crossover_A
+		state := MRBState.None
+	else if cci_crossunder_C
+		state := MRBState.None
+
+	if cci_crossunder_A
+		state := MRBState.SetupS
+	else if cci_crossover_C
+		state := MRBState.SetupB
+
+	if state == MRBState.SetupB and cci_crossunder_B
+		state := MRBState.ArmedB
+	else if state == MRBState.SetupS and cci_crossover_B
+		state := MRBState.ArmedS
+
+	if state == MRBState.ArmedB and cci_B_event == -1
+		bear_value := -1
+		state := MRBState.None
+	else if state == MRBState.ArmedS and cci_B_event == 1
+		bull_value := 1
+		state := MRBState.None
+
+	[bull_value, bear_value]
+
+// type Signal
+// 	map<string, int> signal = na
+
+// type EnabledSignals
+// 	map<string, Signal> signals = na
+
+
+// EnabledSignals global_enabled_signals
+
+// f_init_signals() =>
+// 	global_enabled_signals := EnabledSignals.new()
+// 	global_enabled_signals.signals["arrow0"] := Signal.new()
+// 	global_enabled_signals.signals["arrow5"] := Signal.new()
+// 	global_enabled_signals.signals["reversal_cci"] := Signal.new()
+// 	global_enabled_signals.signals["reversal_bbp"] := Signal.new()
+
+
+
+// —————————————————————————————————————————————————————————————————————————————
+// User Interface (UI)
+// —————————————————————————————————————————————————————————————————————————————
+
+group_arrow_reset = "Arrow Reset Settings"
+arrow_reset_tf_ops = input.timeframe("", "Ops (1-6) Reset Timeframe", group = group_arrow_reset)
+op1 = false, op2 = false, op3 = false, op4 = false, op5 = false, op6 = false
+arrow_reset_tf_signals = input.timeframe("", "Opposing Signal Reset Timeframe", group = group_arrow_reset)
+string resetTooltip = "If checked, an arrow signal will be canceled if one of these selected opposing signals occurs on the 'Opposing Signal Reset Timeframe'."
+
+reset_on_cci100_up = input.string("None", "Reset on C100+", options=["None", "Bullish", "Bearish", "Both"], tooltip=resetTooltip, group = group_arrow_reset, inline="reset_cci100"), reset_on_cci100_down = input.string("None", "C100-", options=["None", "Bullish", "Bearish", "Both"], tooltip=resetTooltip, group = group_arrow_reset, inline="reset_cci100")
+reset_on_cci0_up = input.string("None", "Reset on C0+", options=["None", "Bullish", "Bearish", "Both"], group = group_arrow_reset, inline="reset_cci0"), reset_on_cci0_down = input.string("None", "C0-", options=["None", "Bullish", "Bearish", "Both"], group = group_arrow_reset, inline="reset_cci0")
+reset_on_cci_100_up = input.string("None", "Reset on C-100+", options=["None", "Bullish", "Bearish", "Both"], group = group_arrow_reset, inline="reset_cci-100"), reset_on_cci_100_down = input.string("None", "C-100-", options=["None", "Bullish", "Bearish", "Both"], group = group_arrow_reset, inline="reset_cci-100")
+reset_on_bbp1_up = input.string("None", "Reset on B1+", options=["None", "Bullish", "Bearish", "Both"], group = group_arrow_reset, inline="reset_bbp1"), reset_on_bbp1_down = input.string("None", "B1-", options=["None", "Bullish", "Bearish", "Both"], group = group_arrow_reset, inline="reset_bbp1")
+reset_on_bbp05_up = input.string("None", "Reset on B0.5+", options=["None", "Bullish", "Bearish", "Both"], group = group_arrow_reset, inline="reset_bbp05"), reset_on_bbp05_down = input.string("None", "B0.5-", options=["None", "Bullish", "Bearish", "Both"], group = group_arrow_reset, inline="reset_bbp05")
+reset_on_bbp0_up = input.string("None", "Reset on B0+", options=["None", "Bullish", "Bearish", "Both"], group = group_arrow_reset, inline="reset_bbp0"), reset_on_bbp0_down = input.string("None", "B0-", options=["None", "Bullish", "Bearish", "Both"], group = group_arrow_reset, inline="reset_bbp0")
+reset_on_cci_bA_up = input.string("None", "Reset on CCI-B A+", options=["None", "Bullish", "Bearish", "Both"], group = group_arrow_reset, inline="reset_cciba"), reset_on_cci_bA_down = input.string("None", "CCI-B A-", options=["None", "Bullish", "Bearish", "Both"], group = group_arrow_reset, inline="reset_cciba")
+reset_on_cci_bB_up = input.string("None", "Reset on CCI-B B+", options=["None", "Bullish", "Bearish", "Both"], group = group_arrow_reset, inline="reset_ccibb"), reset_on_cci_bB_down = input.string("None", "CCI-B B-", options=["None", "Bullish", "Bearish", "Both"], group = group_arrow_reset, inline="reset_ccibb")
+reset_on_cci_bC_up = input.string("None", "Reset on CCI-B C+", options=["None", "Bullish", "Bearish", "Both"], group = group_arrow_reset, inline="reset_ccibc"), reset_on_cci_bC_down = input.string("None", "CCI-B C-", options=["None", "Bullish", "Bearish", "Both"], group = group_arrow_reset, inline="reset_ccibc")
+reset_on_bbp_bA_up = input.string("None", "Reset on %B-B A+", options=["None", "Bullish", "Bearish", "Both"], group = group_arrow_reset, inline="reset_bbpba"), reset_on_bbp_bA_down = input.string("None", "%B-B A-", options=["None", "Bullish", "Bearish", "Both"], group = group_arrow_reset, inline="reset_bbpba")
+reset_on_bbp_bB_up = input.string("None", "Reset on %B-B B+", options=["None", "Bullish", "Bearish", "Both"], group = group_arrow_reset, inline="reset_bbpbb"), reset_on_bbp_bB_down = input.string("None", "%B-B B-", options=["None", "Bullish", "Bearish", "Both"], group = group_arrow_reset, inline="reset_bbpbb")
+reset_on_bbp_bC_up = input.string("None", "Reset on %B-B C+", options=["None", "Bullish", "Bearish", "Both"], group = group_arrow_reset, inline="reset_bbpbc"), reset_on_bbp_bC_down = input.string("None", "%B-B C-", options=["None", "Bullish", "Bearish", "Both"], group = group_arrow_reset, inline="reset_bbpbc")
+reset_on_simul_breakout_up = input.string("None", "Reset on Simul Breakout+", options=["None", "Bullish", "Bearish", "Both"], group = group_arrow_reset, inline="reset_simul"), reset_on_simul_breakout_down = input.string("None", "Simul Breakout-", options=["None", "Bullish", "Bearish", "Both"], group = group_arrow_reset, inline="reset_simul")
+
+group_arrow_reset_2 = "Arrow Reset Settings 2"
+arrow_reset_tf_ops_2 = input.timeframe("", "Ops (1-6) Reset Timeframe 2", group = group_arrow_reset_2)
+op1_2 = input.bool(false, "Reset Up on B-%B=2", group = group_arrow_reset_2), op2_2 = input.bool(false, "Reset Up on RegionB%=A/AA", group = group_arrow_reset_2), op3_2 = input.bool(false, "Reset Up on C-%B contains 2", group = group_arrow_reset_2)
+op4_2 = input.bool(false, "Reset Down on B-%B=1", group = group_arrow_reset_2), op5_2 = input.bool(false, "Reset Down on A-%B contains 1", group = group_arrow_reset_2), op6_2 = input.bool(false, "Reset Down on RegionB%=D/DD", group = group_arrow_reset_2)
+
+arrow_reset_tf_signals_2 = input.timeframe("", "Opposing Signal Reset Timeframe 2", group = group_arrow_reset_2)
+string resetTooltip_2 = "If checked, an arrow signal will be canceled if one of these selected opposing signals occurs on the 'Opposing Signal Reset Timeframe 2'."
+
+reset_on_cci100_up_2 = input.string("None", "Reset on C100+", options=["None", "Bullish", "Bearish", "Both"], tooltip=resetTooltip_2, group = group_arrow_reset_2, inline="reset_cci100_2"), reset_on_cci100_down_2 = input.string("None", "C100-", options=["None", "Bullish", "Bearish", "Both"], tooltip=resetTooltip_2, group = group_arrow_reset_2, inline="reset_cci100_2")
+reset_on_cci0_up_2 = input.string("None", "Reset on C0+", options=["None", "Bullish", "Bearish", "Both"], group = group_arrow_reset_2, inline="reset_cci0_2"), reset_on_cci0_down_2 = input.string("None", "C0-", options=["None", "Bullish", "Bearish", "Both"], group = group_arrow_reset_2, inline="reset_cci0_2")
+reset_on_cci_100_up_2 = input.string("None", "Reset on C-100+", options=["None", "Bullish", "Bearish", "Both"], group = group_arrow_reset_2, inline="reset_cci-100_2"), reset_on_cci_100_down_2 = input.string("None", "C-100-", options=["None", "Bullish", "Bearish", "Both"], group = group_arrow_reset_2, inline="reset_cci-100_2")
+reset_on_bbp1_up_2 = input.string("None", "Reset on B1+", options=["None", "Bullish", "Bearish", "Both"], group = group_arrow_reset_2, inline="reset_bbp1_2"), reset_on_bbp1_down_2 = input.string("None", "B1-", options=["None", "Bullish", "Bearish", "Both"], group = group_arrow_reset_2, inline="reset_bbp1_2")
+reset_on_bbp05_up_2 = input.string("None", "Reset on B0.5+", options=["None", "Bullish", "Bearish", "Both"], group = group_arrow_reset_2, inline="reset_bbp05_2"), reset_on_bbp05_down_2 = input.string("None", "B0.5-", options=["None", "Bullish", "Bearish", "Both"], group = group_arrow_reset_2, inline="reset_bbp05_2")
+reset_on_bbp0_up_2 = input.string("None", "Reset on B0+", options=["None", "Bullish", "Bearish", "Both"], group = group_arrow_reset_2, inline="reset_bbp0_2"), reset_on_bbp0_down_2 = input.string("None", "B0-", options=["None", "Bullish", "Bearish", "Both"], group = group_arrow_reset_2, inline="reset_bbp0_2")
+reset_on_cci_bA_up_2 = input.string("None", "Reset on CCI-B A+", options=["None", "Bullish", "Bearish", "Both"], group = group_arrow_reset_2, inline="reset_cciba_2"), reset_on_cci_bA_down_2 = input.string("None", "CCI-B A-", options=["None", "Bullish", "Bearish", "Both"], group = group_arrow_reset_2, inline="reset_cciba_2")
+reset_on_cci_bB_up_2 = input.string("None", "Reset on CCI-B B+", options=["None", "Bullish", "Bearish", "Both"], group = group_arrow_reset_2, inline="reset_ccibb_2"), reset_on_cci_bB_down_2 = input.string("None", "CCI-B B-", options=["None", "Bullish", "Bearish", "Both"], group = group_arrow_reset_2, inline="reset_ccibb_2")
+reset_on_cci_bC_up_2 = input.string("None", "Reset on CCI-B C+", options=["None", "Bullish", "Bearish", "Both"], group = group_arrow_reset_2, inline="reset_ccibc_2"), reset_on_cci_bC_down_2 = input.string("None", "CCI-B C-", options=["None", "Bullish", "Bearish", "Both"], group = group_arrow_reset_2, inline="reset_ccibc_2")
+reset_on_bbp_bA_up_2 = input.string("None", "Reset on %B-B A+", options=["None", "Bullish", "Bearish", "Both"], group = group_arrow_reset_2, inline="reset_bbpba_2"), reset_on_bbp_bA_down_2 = input.string("None", "%B-B A-", options=["None", "Bullish", "Bearish", "Both"], group = group_arrow_reset_2, inline="reset_bbpba_2")
+reset_on_bbp_bB_up_2 = input.string("None", "Reset on %B-B B+", options=["None", "Bullish", "Bearish", "Both"], group = group_arrow_reset_2, inline="reset_bbpbb_2"), reset_on_bbp_bB_down_2 = input.string("None", "%B-B B-", options=["None", "Bullish", "Bearish", "Both"], group = group_arrow_reset_2, inline="reset_bbpbb_2")
+reset_on_bbp_bC_up_2 = input.string("None", "Reset on %B-B C+", options=["None", "Bullish", "Bearish", "Both"], group = group_arrow_reset_2, inline="reset_bbpbc_2"), reset_on_bbp_bC_down_2 = input.string("None", "%B-B C-", options=["None", "Bullish", "Bearish", "Both"], group = group_arrow_reset_2, inline="reset_bbpbc_2")
+reset_on_simul_breakout_up_2 = input.string("None", "Reset on Simul Breakout+", options=["None", "Bullish", "Bearish", "Both"], group = group_arrow_reset_2, inline="reset_simul_2"), reset_on_simul_breakout_down_2 = input.string("None", "Simul Breakout-", options=["None", "Bullish", "Bearish", "Both"], group = group_arrow_reset_2, inline="reset_simul_2")
+
+group_l1 = "Layer 1 • Primary"
+enableL1 = input.bool(true, "L1 Enable", group=group_l1)
+tfL1 = input.timeframe("", "L1 Timeframe", group=group_l1)
+l1_show_cci100_bull = input.bool(false, "L1 C100+ Bull", group=group_l1, inline="l1_cci100"), l1_show_cci100_bear = input.bool(false, "L1 C100- Bear", group=group_l1, inline="l1_cci100")
+l1_show_cci0_bull = input.bool(false, "L1 C0+ Bull", group=group_l1, inline="l1_cci0"), l1_show_cci0_bear = input.bool(false, "L1 C0- Bear", group=group_l1, inline="l1_cci0")
+l1_show_cci_100_bull = input.bool(false, "L1 C-100+ Bull", group=group_l1, inline="l1_cci-100"), l1_show_cci_100_bear = input.bool(false, "L1 C-100- Bear", group=group_l1, inline="l1_cci-100")
+l1_show_bbp1_bull = input.bool(false, "L1 B1+ Bull", group=group_l1, inline="l1_bbp1"), l1_show_bbp1_bear = input.bool(false, "L1 B1- Bear", group=group_l1, inline="l1_bbp1")
+l1_show_bbp05_bull = input.bool(false, "L1 B0.5+ Bull", group=group_l1, inline="l1_bbp05"), l1_show_bbp05_bear = input.bool(false, "L1 B0.5- Bear", group=group_l1, inline="l1_bbp05")
+l1_show_bbp0_bull = input.bool(false, "L1 B0+ Bull", group=group_l1, inline="l1_bbp0"), l1_show_bbp0_bear = input.bool(false, "L1 B0- Bear", group=group_l1, inline="l1_bbp0")
+l1_show_cci_bA_bull = input.bool(false, "L1 CCI-B A Bull", group=group_l1, inline="l1_cciba"), l1_show_cci_bA_bear = input.bool(false, "L1 CCI-B A Bear", group=group_l1, inline="l1_cciba")
+l1_show_cci_bB_bull = input.bool(false, "L1 CCI-B B Bull", group=group_l1, inline="l1_ccibb"), l1_show_cci_bB_bear = input.bool(false, "L1 CCI-B B Bear", group=group_l1, inline="l1_ccibb")
+l1_show_cci_bC_bull = input.bool(false, "L1 CCI-B C Bull", group=group_l1, inline="l1_ccibc"), l1_show_cci_bC_bear = input.bool(false, "L1 CCI-B C Bear", group=group_l1, inline="l1_ccibc")
+l1_show_bbp_bA_bull = input.bool(false, "L1 %B-B A Bull", group=group_l1, inline="l1_bbpba"), l1_show_bbp_bA_bear = input.bool(false, "L1 %B-B A Bear", group=group_l1, inline="l1_bbpba")
+l1_show_bbp_bB_bull = input.bool(false, "L1 %B-B B Bull", group=group_l1, inline="l1_bbpbb"), l1_show_bbp_bB_bear = input.bool(false, "L1 %B-B B Bear", group=group_l1, inline="l1_bbpbb")
+l1_show_bbp_bC_bull = input.bool(false, "L1 %B-B C Bull", group=group_l1, inline="l1_bbpbc"), l1_show_bbp_bC_bear = input.bool(false, "L1 %B-B C Bear", group=group_l1, inline="l1_bbpbc")
+l1_show_arrow0_bull = input.bool(false, "L1 Arrow 0 Bull", group=group_l1, inline="l1_a0"), l1_show_arrow0_bear = input.bool(false, "L1 Arrow 0 Bear", group=group_l1, inline="l1_a0")
+l1_show_arrow1_bull = input.bool(false, "L1 Arrow 1 Bull", group=group_l1, inline="l1_a1"), l1_show_arrow1_bear = input.bool(false, "L1 Arrow 1 Bear", group=group_l1, inline="l1_a1")
+l1_show_arrow2_bull = input.bool(false, "L1 Arrow 2 Bull", group=group_l1, inline="l1_a2"), l1_show_arrow2_bear = input.bool(false, "L1 Arrow 2 Bear", group=group_l1, inline="l1_a2"), l1_show_arrow2_encircled = input.bool(false, "L1 Arrow 2 Encircled", group=group_l1, inline="l1_a2")
+l1_show_arrow3_bull = input.bool(false, "L1 Arrow 3 Bull", group=group_l1, inline="l1_a3"), l1_show_arrow3_bear = input.bool(false, "L1 Arrow 3 Bear", group=group_l1, inline="l1_a3")
+l1_show_arrow4_bull = input.bool(false, "L1 Arrow 4 Bull", group=group_l1, inline="l1_a4"), l1_show_arrow4_bear = input.bool(false, "L1 Arrow 4 Bear", group=group_l1, inline="l1_a4")
+l1_show_arrow5_bull = input.bool(false, "L1 Arrow 5 Bull", group=group_l1, inline="l1_a5"), l1_show_arrow5_bear = input.bool(false, "L1 Arrow 5 Bear", group=group_l1, inline="l1_a5")
+l1_show_reversal_bull = input.bool(false, "L1 Reversal CCI Bull", group=group_l1, inline="l1_rev"), l1_show_reversal_bear = input.bool(false, "L1 Reversal CCI Bear", group=group_l1, inline="l1_rev")
+l1_show_reversal_bbp_bull = input.bool(false, "L1 Reversal BBP Bull", group=group_l1, inline="l1_rev_bbp"), l1_show_reversal_bbp_bear = input.bool(false, "L1 Reversal BBP Bear", group=group_l1, inline="l1_rev_bbp")
+l1_show_simul_breakout_bull = input.bool(true, "L1 Simul Breakout Bull", group=group_l1, inline="l1_simul"), l1_show_simul_breakout_bear = input.bool(true, "L1 Simul Breakout Bear", group=group_l1, inline="l1_simul")
+l1_msg_cci100_bull = input.string("", "C100+ Bull Msg", group=group_l1, inline="l1_msg_cci100"), l1_msg_cci100_bear = input.string("", "C100- Bear Msg", group=group_l1, inline="l1_msg_cci100")
+l1_msg_cci0_bull = input.string("", "C0+ Bull Msg", group=group_l1, inline="l1_msg_cci0"), l1_msg_cci0_bear = input.string("", "C0- Bear Msg", group=group_l1, inline="l1_msg_cci0")
+l1_msg_cci_100_bull = input.string("", "C-100+ Bull Msg", group=group_l1, inline="l1_msg_cci_100"), l1_msg_cci_100_bear = input.string("", "C-100- Bear Msg", group=group_l1, inline="l1_msg_cci_100")
+l1_msg_bbp1_bull = input.string("", "B1+ Bull Msg", group=group_l1, inline="l1_msg_bbp1"), l1_msg_bbp1_bear = input.string("", "B1- Bear Msg", group=group_l1, inline="l1_msg_bbp1")
+l1_msg_bbp05_bull = input.string("", "B0.5+ Bull Msg", group=group_l1, inline="l1_msg_bbp05"), l1_msg_bbp05_bear = input.string("", "B0.5- Bear Msg", group=group_l1, inline="l1_msg_bbp05")
+l1_msg_bbp0_bull = input.string("", "B0+ Bull Msg", group=group_l1, inline="l1_msg_bbp0"), l1_msg_bbp0_bear = input.string("", "B0- Bear Msg", group=group_l1, inline="l1_msg_bbp0")
+l1_msg_cci_bA_bull = input.string("", "CCI-BA Bull Msg", group=group_l1, inline="l1_msg_cciba"), l1_msg_cci_bA_bear = input.string("", "CCI-BA Bear Msg", group=group_l1, inline="l1_msg_cciba")
+l1_msg_cci_bB_bull = input.string("", "CCI-BB Bull Msg", group=group_l1, inline="l1_msg_ccibb"), l1_msg_cci_bB_bear = input.string("", "CCI-BB Bear Msg", group=group_l1, inline="l1_msg_ccibb")
+l1_msg_cci_bC_bull = input.string("", "CCI-BC Bull Msg", group=group_l1, inline="l1_msg_ccibc"), l1_msg_cci_bC_bear = input.string("", "CCI-BC Bear Msg", group=group_l1, inline="l1_msg_ccibc")
+l1_msg_bbp_bA_bull = input.string("", "%B-BA Bull Msg", group=group_l1, inline="l1_msg_bbpba"), l1_msg_bbp_bA_bear = input.string("", "%B-BA Bear Msg", group=group_l1, inline="l1_msg_bbpba")
+l1_msg_bbp_bB_bull = input.string("", "%B-BB Bull Msg", group=group_l1, inline="l1_msg_bbpbb"), l1_msg_bbp_bB_bear = input.string("", "%B-BB Bear Msg", group=group_l1, inline="l1_msg_bbpbb")
+l1_msg_bbp_bC_bull = input.string("", "%B-BC Bull Msg", group=group_l1, inline="l1_msg_bbpbc"), l1_msg_bbp_bC_bear = input.string("", "%B-BC Bear Msg", group=group_l1, inline="l1_msg_bbpbc")
+l1_msg_arrow0_bull = input.string("", "Arrow 0 Bull Msg", group=group_l1, inline="l1_msg_a0"), l1_msg_arrow0_bear = input.string("", "Arrow 0 Bear Msg", group=group_l1, inline="l1_msg_a0")
+l1_msg_arrow1_bull = input.string("", "Arrow 1 Bull Msg", group=group_l1, inline="l1_msg_a1"), l1_msg_arrow1_bear = input.string("", "Arrow 1 Bear Msg", group=group_l1, inline="l1_msg_a1")
+l1_msg_arrow2_bull = input.string("", "Arrow 2 Bull Msg", group=group_l1, inline="l1_msg_a2"), l1_msg_arrow2_bear = input.string("", "Arrow 2 Bear Msg", group=group_l1, inline="l1_msg_a2")
+l1_msg_arrow2_encircled_bull = input.string("", "Arrow 2 Encircled Bull Msg", group=group_l1, inline="l1_msg_a2e"), l1_msg_arrow2_encircled_bear = input.string("", "Arrow 2 Encircled Bear Msg", group=group_l1, inline="l1_msg_a2e")
+l1_msg_arrow3_bull = input.string("", "Arrow 3 Bull Msg", group=group_l1, inline="l1_msg_a3"), l1_msg_arrow3_bear = input.string("", "Arrow 3 Bear Msg", group=group_l1, inline="l1_msg_a3")
+l1_msg_arrow4_bull = input.string("", "Arrow 4 Bull Msg", group=group_l1, inline="l1_msg_a4"), l1_msg_arrow4_bear = input.string("", "Arrow 4 Bear Msg", group=group_l1, inline="l1_msg_a4")
+l1_msg_arrow5_bull = input.string("", "Arrow 5 Bull Msg", group=group_l1, inline="l1_msg_a5"), l1_msg_arrow5_bear = input.string("", "Arrow 5 Bear Msg", group=group_l1, inline="l1_msg_a5")
+l1_msg_reversal_bull = input.string("", "Reversal CCI Bull Msg", group=group_l1, inline="l1_msg_rev"), l1_msg_reversal_bear = input.string("", "Reversal CCI Bear Msg", group=group_l1, inline="l1_msg_rev")
+l1_msg_reversal_bbp_bull = input.string("", "Reversal BBP Bull Msg", group=group_l1, inline="l1_msg_rev_bbp"), l1_msg_reversal_bbp_bear = input.string("", "Reversal BBP Bear Msg", group=group_l1, inline="l1_msg_rev_bbp")
+l1_msg_simul_breakout_bull = input.string("", "Simul Breakout Bull Msg", group=group_l1, inline="l1_msg_simul"), l1_msg_simul_breakout_bear = input.string("", "Simul Breakout Bear Msg", group=group_l1, inline="l1_msg_simul")
+l1BullTextColor = input.color(color.white, "L1 Bull Text Color", group=group_l1), l1BullShapeColor = input.color(color.new(color.teal, 20), "L1 Bull Shape Color", group=group_l1)
+l1_trade_type_cci100_bull = input.string("", "C100+ Bull Type", group=group_l1, inline="l1_tt_cci100"), l1_trade_type_cci100_bear = input.string("", "C100- Bear Type", group=group_l1, inline="l1_tt_cci100")
+l1_trade_type_cci0_bull = input.string("", "C0+ Bull Type", group=group_l1, inline="l1_tt_cci0"), l1_trade_type_cci0_bear = input.string("", "C0- Bear Type", group=group_l1, inline="l1_tt_cci0")
+l1_trade_type_cci_100_bull = input.string("", "C-100+ Bull Type", group=group_l1, inline="l1_tt_cci_100"), l1_trade_type_cci_100_bear = input.string("", "C-100- Bear Type", group=group_l1, inline="l1_tt_cci_100")
+l1_trade_type_bbp1_bull = input.string("", "B1+ Bull Type", group=group_l1, inline="l1_tt_bbp1"), l1_trade_type_bbp1_bear = input.string("", "B1- Bear Type", group=group_l1, inline="l1_tt_bbp1")
+l1_trade_type_bbp05_bull = input.string("", "B0.5+ Bull Type", group=group_l1, inline="l1_tt_bbp05"), l1_trade_type_bbp05_bear = input.string("", "B0.5- Bear Type", group=group_l1, inline="l1_tt_bbp05")
+l1_trade_type_bbp0_bull = input.string("", "B0+ Bull Type", group=group_l1, inline="l1_tt_bbp0"), l1_trade_type_bbp0_bear = input.string("", "B0- Bear Type", group=group_l1, inline="l1_tt_bbp0")
+l1_trade_type_cci_bA_bull = input.string("", "CCI-BA Bull Type", group=group_l1, inline="l1_tt_cciba"), l1_trade_type_cci_bA_bear = input.string("", "CCI-BA Bear Type", group=group_l1, inline="l1_tt_cciba")
+l1_trade_type_cci_bB_bull = input.string("", "CCI-BB Bull Type", group=group_l1, inline="l1_tt_ccibb"), l1_trade_type_cci_bB_bear = input.string("", "CCI-BB Bear Type", group=group_l1, inline="l1_tt_ccibb")
+l1_trade_type_cci_bC_bull = input.string("", "CCI-BC Bull Type", group=group_l1, inline="l1_tt_ccibc"), l1_trade_type_cci_bC_bear = input.string("", "CCI-BC Bear Type", group=group_l1, inline="l1_tt_ccibc")
+l1_trade_type_bbp_bA_bull = input.string("", "%B-BA Bull Type", group=group_l1, inline="l1_tt_bbpba"), l1_trade_type_bbp_bA_bear = input.string("", "%B-BA Bear Type", group=group_l1, inline="l1_tt_bbpba")
+l1_trade_type_bbp_bB_bull = input.string("", "%B-BB Bull Type", group=group_l1, inline="l1_tt_bbpbb"), l1_trade_type_bbp_bB_bear = input.string("", "%B-BB Bear Type", group=group_l1, inline="l1_tt_bbpbb")
+l1_trade_type_bbp_bC_bull = input.string("", "%B-BC Bull Type", group=group_l1, inline="l1_tt_bbpbc"), l1_trade_type_bbp_bC_bear = input.string("", "%B-BC Bear Type", group=group_l1, inline="l1_tt_bbpbc")
+l1_trade_type_arrow0_bull = input.string("", "Arrow 0 Bull Type", group=group_l1, inline="l1_tt_a0"), l1_trade_type_arrow0_bear = input.string("", "Arrow 0 Bear Type", group=group_l1, inline="l1_tt_a0")
+l1_trade_type_arrow1_bull = input.string("", "Arrow 1 Bull Type", group=group_l1, inline="l1_tt_a1"), l1_trade_type_arrow1_bear = input.string("", "Arrow 1 Bear Type", group=group_l1, inline="l1_tt_a1")
+l1_trade_type_arrow2_bull = input.string("", "Arrow 2 Bull Type", group=group_l1, inline="l1_tt_a2"), l1_trade_type_arrow2_bear = input.string("", "Arrow 2 Bear Type", group=group_l1, inline="l1_tt_a2")
+l1_trade_type_arrow2_encircled_bull = input.string("", "Arrow 2 Encircled Bull Type", group=group_l1, inline="l1_tt_a2e"), l1_trade_type_arrow2_encircled_bear = input.string("", "Arrow 2 Encircled Bear Type", group=group_l1, inline="l1_tt_a2e")
+l1_trade_type_arrow3_bull = input.string("", "Arrow 3 Bull Type", group=group_l1, inline="l1_tt_a3"), l1_trade_type_arrow3_bear = input.string("", "Arrow 3 Bear Type", group=group_l1, inline="l1_tt_a3")
+l1_trade_type_arrow4_bull = input.string("", "Arrow 4 Bull Type", group=group_l1, inline="l1_tt_a4"), l1_trade_type_arrow4_bear = input.string("", "Arrow 4 Bear Type", group=group_l1, inline="l1_tt_a4")
+l1_trade_type_arrow5_bull = input.string("", "Arrow 5 Bull Type", group=group_l1, inline="l1_tt_a5"), l1_trade_type_arrow5_bear = input.string("", "Arrow 5 Bear Type", group=group_l1, inline="l1_tt_a5")
+l1_trade_type_reversal_bull = input.string("", "Reversal CCI Bull Type", group=group_l1, inline="l1_tt_rev"), l1_trade_type_reversal_bear = input.string("", "Reversal CCI Bear Type", group=group_l1, inline="l1_tt_rev")
+l1_trade_type_reversal_bbp_bull = input.string("", "Reversal BBP Bull Type", group=group_l1, inline="l1_tt_rev_bbp"), l1_trade_type_reversal_bbp_bear = input.string("", "Reversal BBP Bear Type", group=group_l1, inline="l1_tt_rev_bbp")
+l1_trade_type_simul_breakout_bull = input.string("", "Simul Breakout Bull Type", group=group_l1, inline="l1_tt_simul"), l1_trade_type_simul_breakout_bear = input.string("", "Simul Breakout Bear Type", group=group_l1, inline="l1_tt_simul")
+l1BearTextColor = input.color(color.white, "L1 Bear Text Color", group=group_l1), l1BearShapeColor = input.color(color.new(color.red, 20), "L1 Bear Shape Color", group=group_l1)
+
+group_l2 = "Layer 2 • Secondary"
+enableL2 = input.bool(false, "L2 Enable", group=group_l2)
+tfL2 = input.timeframe("60", "L2 Timeframe", group=group_l2)
+l2_show_cci100_bull = input.bool(false, "L2 C100+ Bull", group=group_l2, inline="l2_cci100"), l2_show_cci100_bear = input.bool(false, "L2 C100- Bear", group=group_l2, inline="l2_cci100")
+l2_show_cci0_bull = input.bool(false, "L2 C0+ Bull", group=group_l2, inline="l2_cci0"), l2_show_cci0_bear = input.bool(false, "L2 C0- Bear", group=group_l2, inline="l2_cci0")
+l2_show_cci_100_bull = input.bool(false, "L2 C-100+ Bull", group=group_l2, inline="l2_cci-100"), l2_show_cci_100_bear = input.bool(false, "L2 C-100- Bear", group=group_l2, inline="l2_cci-100")
+l2_show_bbp1_bull = input.bool(false, "L2 B1+ Bull", group=group_l2, inline="l2_bbp1"), l2_show_bbp1_bear = input.bool(false, "L2 B1- Bear", group=group_l2, inline="l2_bbp1")
+l2_show_bbp05_bull = input.bool(false, "L2 B0.5+ Bull", group=group_l2, inline="l2_bbp05"), l2_show_bbp05_bear = input.bool(false, "L2 B0.5- Bear", group=group_l2, inline="l2_bbp05")
+l2_show_bbp0_bull = input.bool(false, "L2 B0+ Bull", group=group_l2, inline="l2_bbp0"), l2_show_bbp0_bear = input.bool(false, "L2 B0- Bear", group=group_l2, inline="l2_bbp0")
+l2_show_cci_bA_bull = input.bool(false, "L2 CCI-B A Bull", group=group_l2, inline="l2_cciba"), l2_show_cci_bA_bear = input.bool(false, "L2 CCI-B A Bear", group=group_l2, inline="l2_cciba")
+l2_show_cci_bB_bull = input.bool(false, "L2 CCI-B B Bull", group=group_l2, inline="l2_ccibb"), l2_show_cci_bB_bear = input.bool(false, "L2 CCI-B B Bear", group=group_l2, inline="l2_ccibb")
+l2_show_cci_bC_bull = input.bool(false, "L2 CCI-B C Bull", group=group_l2, inline="l2_ccibc"), l2_show_cci_bC_bear = input.bool(false, "L2 CCI-B C Bear", group=group_l2, inline="l2_ccibc")
+l2_show_bbp_bA_bull = input.bool(false, "L2 %B-B A Bull", group=group_l2, inline="l2_bbpba"), l2_show_bbp_bA_bear = input.bool(false, "L2 %B-B A Bear", group=group_l2, inline="l2_bbpba")
+l2_show_bbp_bB_bull = input.bool(false, "L2 %B-B B Bull", group=group_l2, inline="l2_bbpbb"), l2_show_bbp_bB_bear = input.bool(false, "L2 %B-B B Bear", group=group_l2, inline="l2_bbpbb")
+l2_show_bbp_bC_bull = input.bool(false, "L2 %B-B C Bull", group=group_l2, inline="l2_bbpbc"), l2_show_bbp_bC_bear = input.bool(false, "L2 %B-B C Bear", group=group_l2, inline="l2_bbpbc")
+l2_show_arrow0_bull = input.bool(false, "L2 Arrow 0 Bull", group=group_l2, inline="l2_a0"), l2_show_arrow0_bear = input.bool(false, "L2 Arrow 0 Bear", group=group_l2, inline="l2_a0")
+l2_show_arrow1_bull = input.bool(false, "L2 Arrow 1 Bull", group=group_l2, inline="l2_a1"), l2_show_arrow1_bear = input.bool(false, "L2 Arrow 1 Bear", group=group_l2, inline="l2_a1")
+l2_show_arrow2_bull = input.bool(false, "L2 Arrow 2 Bull", group=group_l2, inline="l2_a2"), l2_show_arrow2_bear = input.bool(false, "L2 Arrow 2 Bear", group=group_l2, inline="l2_a2"), l2_show_arrow2_encircled = input.bool(true, "L2 Arrow 2 Encircled", group=group_l2, inline="l2_a2")
+l2_show_arrow3_bull = input.bool(false, "L2 Arrow 3 Bull", group=group_l2, inline="l2_a3"), l2_show_arrow3_bear = input.bool(false, "L2 Arrow 3 Bear", group=group_l2, inline="l2_a3")
+l2_show_arrow4_bull = input.bool(false, "L2 Arrow 4 Bull", group=group_l2, inline="l2_a4"), l2_show_arrow4_bear = input.bool(false, "L2 Arrow 4 Bear", group=group_l2, inline="l2_a4")
+l2_show_arrow5_bull = input.bool(false, "L2 Arrow 5 Bull", group=group_l2, inline="l2_a5"), l2_show_arrow5_bear = input.bool(false, "L2 Arrow 5 Bear", group=group_l2, inline="l2_a5")
+l2_show_reversal_bull = input.bool(false, "L2 Reversal CCI Bull", group=group_l2, inline="l2_rev"), l2_show_reversal_bear = input.bool(false, "L2 Reversal CCI Bear", group=group_l2, inline="l2_rev")
+l2_show_reversal_bbp_bull = input.bool(false, "L2 Reversal BBP Bull", group=group_l2, inline="l2_rev_bbp"), l2_show_reversal_bbp_bear = input.bool(false, "L2 Reversal BBP Bear", group=group_l2, inline="l2_rev_bbp")
+l2_show_simul_breakout_bull = input.bool(false, "L2 Simul Breakout Bull", group=group_l2, inline="l2_simul"), l2_show_simul_breakout_bear = input.bool(false, "L2 Simul Breakout Bear", group=group_l2, inline="l2_simul")
+l2_msg_cci100_bull = input.string("", "C100+ Bull Msg", group=group_l2, inline="l2_msg_cci100"), l2_msg_cci100_bear = input.string("", "C100- Bear Msg", group=group_l2, inline="l2_msg_cci100")
+l2_msg_cci0_bull = input.string("", "C0+ Bull Msg", group=group_l2, inline="l2_msg_cci0"), l2_msg_cci0_bear = input.string("", "C0- Bear Msg", group=group_l2, inline="l2_msg_cci0")
+l2_msg_cci_100_bull = input.string("", "C-100+ Bull Msg", group=group_l2, inline="l2_msg_cci_100"), l2_msg_cci_100_bear = input.string("", "C-100- Bear Msg", group=group_l2, inline="l2_msg_cci_100")
+l2_msg_bbp1_bull = input.string("", "B1+ Bull Msg", group=group_l2, inline="l2_msg_bbp1"), l2_msg_bbp1_bear = input.string("", "B1- Bear Msg", group=group_l2, inline="l2_msg_bbp1")
+l2_msg_bbp05_bull = input.string("", "B0.5+ Bull Msg", group=group_l2, inline="l2_msg_bbp05"), l2_msg_bbp05_bear = input.string("", "B0.5- Bear Msg", group=group_l2, inline="l2_msg_bbp05")
+l2_msg_bbp0_bull = input.string("", "B0+ Bull Msg", group=group_l2, inline="l2_msg_bbp0"), l2_msg_bbp0_bear = input.string("", "B0- Bear Msg", group=group_l2, inline="l2_msg_bbp0")
+l2_msg_cci_bA_bull = input.string("", "CCI-BA Bull Msg", group=group_l2, inline="l2_msg_cciba"), l2_msg_cci_bA_bear = input.string("", "CCI-BA Bear Msg", group=group_l2, inline="l2_msg_cciba")
+l2_msg_cci_bB_bull = input.string("", "CCI-BB Bull Msg", group=group_l2, inline="l2_msg_ccibb"), l2_msg_cci_bB_bear = input.string("", "CCI-BB Bear Msg", group=group_l2, inline="l2_msg_ccibb")
+l2_msg_cci_bC_bull = input.string("", "CCI-BC Bull Msg", group=group_l2, inline="l2_msg_ccibc"), l2_msg_cci_bC_bear = input.string("", "CCI-BC Bear Msg", group=group_l2, inline="l2_msg_ccibc")
+l2_msg_bbp_bA_bull = input.string("", "%B-BA Bull Msg", group=group_l2, inline="l2_msg_bbpba"), l2_msg_bbp_bA_bear = input.string("", "%B-BA Bear Msg", group=group_l2, inline="l2_msg_bbpba")
+l2_msg_bbp_bB_bull = input.string("", "%B-BB Bull Msg", group=group_l2, inline="l2_msg_bbpbb"), l2_msg_bbp_bB_bear = input.string("", "%B-BB Bear Msg", group=group_l2, inline="l2_msg_bbpbb")
+l2_msg_bbp_bC_bull = input.string("", "%B-BC Bull Msg", group=group_l2, inline="l2_msg_bbpbc"), l2_msg_bbp_bC_bear = input.string("", "%B-BC Bear Msg", group=group_l2, inline="l2_msg_bbpbc")
+l2_msg_arrow0_bull = input.string("", "Arrow 0 Bull Msg", group=group_l2, inline="l2_msg_a0"), l2_msg_arrow0_bear = input.string("", "Arrow 0 Bear Msg", group=group_l2, inline="l2_msg_a0")
+l2_msg_arrow1_bull = input.string("", "Arrow 1 Bull Msg", group=group_l2, inline="l2_msg_a1"), l2_msg_arrow1_bear = input.string("", "Arrow 1 Bear Msg", group=group_l2, inline="l2_msg_a1")
+l2_msg_arrow2_bull = input.string("", "Arrow 2 Bull Msg", group=group_l2, inline="l2_msg_a2"), l2_msg_arrow2_bear = input.string("", "Arrow 2 Bear Msg", group=group_l2, inline="l2_msg_a2")
+l2_msg_arrow2_encircled_bull = input.string("", "Arrow 2 Encircled Bull Msg", group=group_l2, inline="l2_msg_a2e"), l2_msg_arrow2_encircled_bear = input.string("", "Arrow 2 Encircled Bear Msg", group=group_l2, inline="l2_msg_a2e")
+l2_msg_arrow3_bull = input.string("", "Arrow 3 Bull Msg", group=group_l2, inline="l2_msg_a3"), l2_msg_arrow3_bear = input.string("", "Arrow 3 Bear Msg", group=group_l2, inline="l2_msg_a3")
+l2_msg_arrow4_bull = input.string("", "Arrow 4 Bull Msg", group=group_l2, inline="l2_msg_a4"), l2_msg_arrow4_bear = input.string("", "Arrow 4 Bear Msg", group=group_l2, inline="l2_msg_a4")
+l2_msg_arrow5_bull = input.string("", "Arrow 5 Bull Msg", group=group_l2, inline="l2_msg_a5"), l2_msg_arrow5_bear = input.string("", "Arrow 5 Bear Msg", group=group_l2, inline="l2_msg_a5")
+l2_msg_reversal_bull = input.string("", "Reversal CCI Bull Msg", group=group_l2, inline="l2_msg_rev"), l2_msg_reversal_bear = input.string("", "Reversal CCI Bear Msg", group=group_l2, inline="l2_msg_rev")
+l2_msg_reversal_bbp_bull = input.string("", "Reversal BBP Bull Msg", group=group_l2, inline="l2_msg_rev_bbp"), l2_msg_reversal_bbp_bear = input.string("", "Reversal BBP Bear Msg", group=group_l2, inline="l2_msg_rev_bbp")
+l2_msg_simul_breakout_bull = input.string("", "Simul Breakout Bull Msg", group=group_l2, inline="l2_msg_simul"), l2_msg_simul_breakout_bear = input.string("", "Simul Breakout Bear Msg", group=group_l2, inline="l2_msg_simul")
+l2BullTextColor = input.color(color.white, "L2 Bull Text Color", group=group_l2), l2BullShapeColor = input.color(color.new(color.orange, 20), "L2 Bull ShapeColor", group=group_l2)
+l2_trade_type_cci100_bull = input.string("", "C100+ Bull Type", group=group_l2, inline="l2_tt_cci100"), l2_trade_type_cci100_bear = input.string("", "C100- Bear Type", group=group_l2, inline="l2_tt_cci100")
+l2_trade_type_cci0_bull = input.string("", "C0+ Bull Type", group=group_l2, inline="l2_tt_cci0"), l2_trade_type_cci0_bear = input.string("", "C0- Bear Type", group=group_l2, inline="l2_tt_cci0")
+l2_trade_type_cci_100_bull = input.string("", "C-100+ Bull Type", group=group_l2, inline="l2_tt_cci_100"), l2_trade_type_cci_100_bear = input.string("", "C-100- Bear Type", group=group_l2, inline="l2_tt_cci_100")
+l2_trade_type_bbp1_bull = input.string("", "B1+ Bull Type", group=group_l2, inline="l2_tt_bbp1"), l2_trade_type_bbp1_bear = input.string("", "B1- Bear Type", group=group_l2, inline="l2_tt_bbp1")
+l2_trade_type_bbp05_bull = input.string("", "B0.5+ Bull Type", group=group_l2, inline="l2_tt_bbp05"), l2_trade_type_bbp05_bear = input.string("", "B0.5- Bear Type", group=group_l2, inline="l2_tt_bbp05")
+l2_trade_type_bbp0_bull = input.string("", "B0+ Bull Type", group=group_l2, inline="l2_tt_bbp0"), l2_trade_type_bbp0_bear = input.string("", "B0- Bear Type", group=group_l2, inline="l2_tt_bbp0")
+l2_trade_type_cci_bA_bull = input.string("", "CCI-BA Bull Type", group=group_l2, inline="l2_tt_cciba"), l2_trade_type_cci_bA_bear = input.string("", "CCI-BA Bear Type", group=group_l2, inline="l2_tt_cciba")
+l2_trade_type_cci_bB_bull = input.string("", "CCI-BB Bull Type", group=group_l2, inline="l2_tt_ccibb"), l2_trade_type_cci_bB_bear = input.string("", "CCI-BB Bear Type", group=group_l2, inline="l2_tt_ccibb")
+l2_trade_type_cci_bC_bull = input.string("", "CCI-BC Bull Type", group=group_l2, inline="l2_tt_ccibc"), l2_trade_type_cci_bC_bear = input.string("", "CCI-BC Bear Type", group=group_l2, inline="l2_tt_ccibc")
+l2_trade_type_bbp_bA_bull = input.string("", "%B-BA Bull Type", group=group_l2, inline="l2_tt_bbpba"), l2_trade_type_bbp_bA_bear = input.string("", "%B-BA Bear Type", group=group_l2, inline="l2_tt_bbpba")
+l2_trade_type_bbp_bB_bull = input.string("", "%B-BB Bull Type", group=group_l2, inline="l2_tt_bbpbb"), l2_trade_type_bbp_bB_bear = input.string("", "%B-BB Bear Type", group=group_l2, inline="l2_tt_bbpbb")
+l2_trade_type_bbp_bC_bull = input.string("", "%B-BC Bull Type", group=group_l2, inline="l2_tt_bbpbc"), l2_trade_type_bbp_bC_bear = input.string("", "%B-BC Bear Type", group=group_l2, inline="l2_tt_bbpbc")
+l2_trade_type_arrow0_bull = input.string("", "Arrow 0 Bull Type", group=group_l2, inline="l2_tt_a0"), l2_trade_type_arrow0_bear = input.string("", "Arrow 0 Bear Type", group=group_l2, inline="l2_tt_a0")
+l2_trade_type_arrow1_bull = input.string("", "Arrow 1 Bull Type", group=group_l2, inline="l2_tt_a1"), l2_trade_type_arrow1_bear = input.string("", "Arrow 1 Bear Type", group=group_l2, inline="l2_tt_a1")
+l2_trade_type_arrow2_bull = input.string("", "Arrow 2 Bull Type", group=group_l2, inline="l2_tt_a2"), l2_trade_type_arrow2_bear = input.string("", "Arrow 2 Bear Type", group=group_l2, inline="l2_tt_a2")
+l2_trade_type_arrow2_encircled_bull = input.string("", "Arrow 2 Encircled Bull Type", group=group_l2, inline="l2_tt_a2e"), l2_trade_type_arrow2_encircled_bear = input.string("", "Arrow 2 Encircled Bear Type", group=group_l2, inline="l2_tt_a2e")
+l2_trade_type_arrow3_bull = input.string("", "Arrow 3 Bull Type", group=group_l2, inline="l2_tt_a3"), l2_trade_type_arrow3_bear = input.string("", "Arrow 3 Bear Type", group=group_l2, inline="l2_tt_a3")
+l2_trade_type_arrow4_bull = input.string("", "Arrow 4 Bull Type", group=group_l2, inline="l2_tt_a4"), l2_trade_type_arrow4_bear = input.string("", "Arrow 4 Bear Type", group=group_l2, inline="l2_tt_a4")
+l2_trade_type_arrow5_bull = input.string("", "Arrow 5 Bull Type", group=group_l2, inline="l2_tt_a5"), l2_trade_type_arrow5_bear = input.string("", "Arrow 5 Bear Type", group=group_l2, inline="l2_tt_a5")
+l2_trade_type_reversal_bull = input.string("", "Reversal CCI Bull Type", group=group_l2, inline="l2_tt_rev"), l2_trade_type_reversal_bear = input.string("", "Reversal CCI Bear Type", group=group_l2, inline="l2_tt_rev")
+l2_trade_type_reversal_bbp_bull = input.string("", "Reversal BBP Bull Type", group=group_l2, inline="l2_tt_rev_bbp"), l2_trade_type_reversal_bbp_bear = input.string("", "Reversal BBP Bear Type", group=group_l2, inline="l2_tt_rev_bbp")
+l2_trade_type_simul_breakout_bull = input.string("", "Simul Breakout Bull Type", group=group_l2, inline="l2_tt_simul"), l2_trade_type_simul_breakout_bear = input.string("", "Simul Breakout Bear Type", group=group_l2, inline="l2_tt_simul")
+l2BearTextColor = input.color(color.white, "L2 Bear Text Color", group=group_l2), l2BearShapeColor = input.color(color.new(color.maroon, 20), "L2 Bear Shape Color", group=group_l2)
+
+group_l3 = "Layer 3 • Tertiary"
+enableL3 = input.bool(false, "L3 Enable", group=group_l3)
+tfL3 = input.timeframe("240", "L3 Timeframe", group=group_l3)
+l3_show_cci100_bull = input.bool(false, "L3 C100+ Bull", group=group_l3, inline="l3_cci100"), l3_show_cci100_bear = input.bool(false, "L3 C100- Bear", group=group_l3, inline="l3_cci100")
+l3_show_cci0_bull = input.bool(false, "L3 C0+ Bull", group=group_l3, inline="l3_cci0"), l3_show_cci0_bear = input.bool(false, "L3 C0- Bear", group=group_l3, inline="l3_cci0")
+l3_show_cci_100_bull = input.bool(false, "L3 C-100+ Bull", group=group_l3, inline="l3_cci-100"), l3_show_cci_100_bear = input.bool(false, "L3 C-100- Bear", group=group_l3, inline="l3_cci-100")
+l3_show_bbp1_bull = input.bool(false, "L3 B1+ Bull", group=group_l3, inline="l3_bbp1"), l3_show_bbp1_bear = input.bool(false, "L3 B1- Bear", group=group_l3, inline="l3_bbp1")
+l3_show_bbp05_bull = input.bool(false, "L3 B0.5+ Bull", group=group_l3, inline="l3_bbp05"), l3_show_bbp05_bear = input.bool(false, "L3 B0.5- Bear", group=group_l3, inline="l3_bbp05")
+l3_show_bbp0_bull = input.bool(false, "L3 B0+ Bull", group=group_l3, inline="l3_bbp0"), l3_show_bbp0_bear = input.bool(false, "L3 B0- Bear", group=group_l3, inline="l3_bbp0")
+l3_show_cci_bA_bull = input.bool(false, "L3 CCI-B A Bull", group=group_l3, inline="l3_cciba"), l3_show_cci_bA_bear = input.bool(false, "L3 CCI-B A Bear", group=group_l3, inline="l3_cciba")
+l3_show_cci_bB_bull = input.bool(false, "L3 CCI-B B Bull", group=group_l3, inline="l3_ccibb"), l3_show_cci_bB_bear = input.bool(false, "L3 CCI-B B Bear", group=group_l3, inline="l3_ccibb")
+l3_show_cci_bC_bull = input.bool(false, "L3 CCI-B C Bull", group=group_l3, inline="l3_ccibc"), l3_show_cci_bC_bear = input.bool(false, "L3 CCI-B C Bear", group=group_l3, inline="l3_ccibc")
+l3_show_bbp_bA_bull = input.bool(false, "L3 %B-B A Bull", group=group_l3, inline="l3_bbpba"), l3_show_bbp_bA_bear = input.bool(false, "L3 %B-B A Bear", group=group_l3, inline="l3_bbpba")
+l3_show_bbp_bB_bull = input.bool(false, "L3 %B-B B Bull", group=group_l3, inline="l3_bbpbb"), l3_show_bbp_bB_bear = input.bool(false, "L3 %B-B B Bear", group=group_l3, inline="l3_bbpbb")
+l3_show_bbp_bC_bull = input.bool(false, "L3 %B-B C Bull", group=group_l3, inline="l3_bbpbc"), l3_show_bbp_bC_bear = input.bool(false, "L3 %B-B C Bear", group=group_l3, inline="l3_bbpbc")
+l3_show_arrow0_bull = input.bool(false, "L3 Arrow 0 Bull", group=group_l3, inline="l3_a0"), l3_show_arrow0_bear = input.bool(false, "L3 Arrow 0 Bear", group=group_l3, inline="l3_a0")
+l3_show_arrow1_bull = input.bool(false, "L3 Arrow 1 Bull", group=group_l3, inline="l3_a1"), l3_show_arrow1_bear = input.bool(false, "L3 Arrow 1 Bear", group=group_l3, inline="l3_a1")
+l3_show_arrow2_bull = input.bool(false, "L3 Arrow 2 Bull", group=group_l3, inline="l3_a2"), l3_show_arrow2_bear = input.bool(false, "L3 Arrow 2 Bear", group=group_l3, inline="l3_a2"), l3_show_arrow2_encircled = input.bool(false, "L3 Arrow 2 Encircled", group=group_l3, inline="l3_a2")
+l3_show_arrow3_bull = input.bool(false, "L3 Arrow 3 Bull", group=group_l3, inline="l3_a3"), l3_show_arrow3_bear = input.bool(false, "L3 Arrow 3 Bear", group=group_l3, inline="l3_a3")
+l3_show_arrow4_bull = input.bool(false, "L3 Arrow 4 Bull", group=group_l3, inline="l3_a4"), l3_show_arrow4_bear = input.bool(false, "L3 Arrow 4 Bear", group=group_l3, inline="l3_a4")
+l3_show_arrow5_bull = input.bool(false, "L3 Arrow 5 Bull", group=group_l3, inline="l3_a5"), l3_show_arrow5_bear = input.bool(false, "L3 Arrow 5 Bear", group=group_l3, inline="l3_a5")
+l3_show_reversal_bull = input.bool(false, "L3 Reversal CCI Bull", group=group_l3, inline="l3_rev"), l3_show_reversal_bear = input.bool(false, "L3 Reversal CCI Bear", group=group_l3, inline="l3_rev")
+l3_show_reversal_bbp_bull = input.bool(false, "L3 Reversal BBP Bull", group=group_l3, inline="l3_rev_bbp"), l3_show_reversal_bbp_bear = input.bool(false, "L3 Reversal BBP Bear", group=group_l3, inline="l3_rev_bbp")
+l3_show_simul_breakout_bull = input.bool(false, "L3 Simul Breakout Bull", group=group_l3, inline="l3_simul"), l3_show_simul_breakout_bear = input.bool(false, "L3 Simul Breakout Bear", group=group_l3, inline="l3_simul")
+l3_msg_cci100_bull = input.string("", "C100+ Bull Msg", group=group_l3, inline="l3_msg_cci100"), l3_msg_cci100_bear = input.string("", "C100- Bear Msg", group=group_l3, inline="l3_msg_cci100")
+l3_msg_cci0_bull = input.string("", "C0+ Bull Msg", group=group_l3, inline="l3_msg_cci0"), l3_msg_cci0_bear = input.string("", "C0- Bear Msg", group=group_l3, inline="l3_msg_cci0")
+l3_msg_cci_100_bull = input.string("", "C-100+ Bull Msg", group=group_l3, inline="l3_msg_cci_100"), l3_msg_cci_100_bear = input.string("", "C-100- Bear Msg", group=group_l3, inline="l3_msg_cci_100")
+l3_msg_bbp1_bull = input.string("", "B1+ Bull Msg", group=group_l3, inline="l3_msg_bbp1"), l3_msg_bbp1_bear = input.string("", "B1- Bear Msg", group=group_l3, inline="l3_msg_bbp1")
+l3_msg_bbp05_bull = input.string("", "B0.5+ Bull Msg", group=group_l3, inline="l3_msg_bbp05"), l3_msg_bbp05_bear = input.string("", "B0.5- Bear Msg", group=group_l3, inline="l3_msg_bbp05")
+l3_msg_bbp0_bull = input.string("", "B0+ Bull Msg", group=group_l3, inline="l3_msg_bbp0"), l3_msg_bbp0_bear = input.string("", "B0- Bear Msg", group=group_l3, inline="l3_msg_bbp0")
+l3_msg_cci_bA_bull = input.string("", "CCI-BA Bull Msg", group=group_l3, inline="l3_msg_cciba"), l3_msg_cci_bA_bear = input.string("", "CCI-BA Bear Msg", group=group_l3, inline="l3_msg_cciba")
+l3_msg_cci_bB_bull = input.string("", "CCI-BB Bull Msg", group=group_l3, inline="l3_msg_ccibb"), l3_msg_cci_bB_bear = input.string("", "CCI-BB Bear Msg", group=group_l3, inline="l3_msg_ccibb")
+l3_msg_cci_bC_bull = input.string("", "CCI-BC Bull Msg", group=group_l3, inline="l3_msg_ccibc"), l3_msg_cci_bC_bear = input.string("", "CCI-BC Bear Msg", group=group_l3, inline="l3_msg_ccibc")
+l3_msg_bbp_bA_bull = input.string("", "%B-BA Bull Msg", group=group_l3, inline="l3_msg_bbpba"), l3_msg_bbp_bA_bear = input.string("", "%B-BA Bear Msg", group=group_l3, inline="l3_msg_bbpba")
+l3_msg_bbp_bB_bull = input.string("", "%B-BB Bull Msg", group=group_l3, inline="l3_msg_bbpbb"), l3_msg_bbp_bB_bear = input.string("", "%B-BB Bear Msg", group=group_l3, inline="l3_msg_bbpbb")
+l3_msg_bbp_bC_bull = input.string("", "%B-BC Bull Msg", group=group_l3, inline="l3_msg_bbpbc"), l3_msg_bbp_bC_bear = input.string("", "%B-BC Bear Msg", group=group_l3, inline="l3_msg_bbpbc")
+l3_msg_arrow0_bull = input.string("", "Arrow 0 Bull Msg", group=group_l3, inline="l3_msg_a0"), l3_msg_arrow0_bear = input.string("", "Arrow 0 Bear Msg", group=group_l3, inline="l3_msg_a0")
+l3_msg_arrow1_bull = input.string("", "Arrow 1 Bull Msg", group=group_l3, inline="l3_msg_a1"), l3_msg_arrow1_bear = input.string("", "Arrow 1 Bear Msg", group=group_l3, inline="l3_msg_a1")
+l3_msg_arrow2_bull = input.string("", "Arrow 2 Bull Msg", group=group_l3, inline="l3_msg_a2"), l3_msg_arrow2_bear = input.string("", "Arrow 2 Bear Msg", group=group_l3, inline="l3_msg_a2")
+l3_msg_arrow2_encircled_bull = input.string("", "Arrow 2 Encircled Bull Msg", group=group_l3, inline="l3_msg_a2e"), l3_msg_arrow2_encircled_bear = input.string("", "Arrow 2 Encircled Bear Msg", group=group_l3, inline="l3_msg_a2e")
+l3_msg_arrow3_bull = input.string("", "Arrow 3 Bull Msg", group=group_l3, inline="l3_msg_a3"), l3_msg_arrow3_bear = input.string("", "Arrow 3 Bear Msg", group=group_l3, inline="l3_msg_a3")
+l3_msg_arrow4_bull = input.string("", "Arrow 4 Bull Msg", group=group_l3, inline="l3_msg_a4"), l3_msg_arrow4_bear = input.string("", "Arrow 4 Bear Msg", group=group_l3, inline="l3_msg_a4")
+l3_msg_arrow5_bull = input.string("", "Arrow 5 Bull Msg", group=group_l3, inline="l3_msg_a5"), l3_msg_arrow5_bear = input.string("", "Arrow 5 Bear Msg", group=group_l3, inline="l3_msg_a5")
+l3_msg_reversal_bull = input.string("", "Reversal CCI Bull Msg", group=group_l3, inline="l3_msg_rev"), l3_msg_reversal_bear = input.string("", "Reversal CCI Bear Msg", group=group_l3, inline="l3_msg_rev")
+l3_msg_reversal_bbp_bull = input.string("", "Reversal BBP Bull Msg", group=group_l3, inline="l3_msg_rev_bbp"), l3_msg_reversal_bbp_bear = input.string("", "Reversal BBP Bear Msg", group=group_l3, inline="l3_msg_rev_bbp")
+l3_msg_simul_breakout_bull = input.string("", "Simul Breakout Bull Msg", group=group_l3, inline="l3_msg_simul"), l3_msg_simul_breakout_bear = input.string("", "Simul Breakout Bear Msg", group=group_l3, inline="l3_msg_simul")
+l3BullTextColor = input.color(color.white, "L3 Bull Text Color", group=group_l3), l3BullShapeColor = input.color(color.new(color.fuchsia, 20), "L3 Bull Shape Color", group=group_l3)
+l3_trade_type_cci100_bull = input.string("", "C100+ Bull Type", group=group_l3, inline="l3_tt_cci100"), l3_trade_type_cci100_bear = input.string("", "C100- Bear Type", group=group_l3, inline="l3_tt_cci100")
+l3_trade_type_cci0_bull = input.string("", "C0+ Bull Type", group=group_l3, inline="l3_tt_cci0"), l3_trade_type_cci0_bear = input.string("", "C0- Bear Type", group=group_l3, inline="l3_tt_cci0")
+l3_trade_type_cci_100_bull = input.string("", "C-100+ Bull Type", group=group_l3, inline="l3_tt_cci_100"), l3_trade_type_cci_100_bear = input.string("", "C-100- Bear Type", group=group_l3, inline="l3_tt_cci_100")
+l3_trade_type_bbp1_bull = input.string("", "B1+ Bull Type", group=group_l3, inline="l3_tt_bbp1"), l3_trade_type_bbp1_bear = input.string("", "B1- Bear Type", group=group_l3, inline="l3_tt_bbp1")
+l3_trade_type_bbp05_bull = input.string("", "B0.5+ Bull Type", group=group_l3, inline="l3_tt_bbp05"), l3_trade_type_bbp05_bear = input.string("", "B0.5- Bear Type", group=group_l3, inline="l3_tt_bbp05")
+l3_trade_type_bbp0_bull = input.string("", "B0+ Bull Type", group=group_l3, inline="l3_tt_bbp0"), l3_trade_type_bbp0_bear = input.string("", "B0- Bear Type", group=group_l3, inline="l3_tt_bbp0")
+l3_trade_type_cci_bA_bull = input.string("", "CCI-BA Bull Type", group=group_l3, inline="l3_tt_cciba"), l3_trade_type_cci_bA_bear = input.string("", "CCI-BA Bear Type", group=group_l3, inline="l3_tt_cciba")
+l3_trade_type_cci_bB_bull = input.string("", "CCI-BB Bull Type", group=group_l3, inline="l3_tt_ccibb"), l3_trade_type_cci_bB_bear = input.string("", "CCI-BB Bear Type", group=group_l3, inline="l3_tt_ccibb")
+l3_trade_type_cci_bC_bull = input.string("", "CCI-BC Bull Type", group=group_l3, inline="l3_tt_ccibc"), l3_trade_type_cci_bC_bear = input.string("", "CCI-BC Bear Type", group=group_l3, inline="l3_tt_ccibc")
+l3_trade_type_bbp_bA_bull = input.string("", "%B-BA Bull Type", group=group_l3, inline="l3_tt_bbpba"), l3_trade_type_bbp_bA_bear = input.string("", "%B-BA Bear Type", group=group_l3, inline="l3_tt_bbpba")
+l3_trade_type_bbp_bB_bull = input.string("", "%B-BB Bull Type", group=group_l3, inline="l3_tt_bbpbb"), l3_trade_type_bbp_bB_bear = input.string("", "%B-BB Bear Type", group=group_l3, inline="l3_tt_bbpbb")
+l3_trade_type_bbp_bC_bull = input.string("", "%B-BC Bull Type", group=group_l3, inline="l3_tt_bbpbc"), l3_trade_type_bbp_bC_bear = input.string("", "%B-BC Bear Type", group=group_l3, inline="l3_tt_bbpbc")
+l3_trade_type_arrow0_bull = input.string("", "Arrow 0 Bull Type", group=group_l3, inline="l3_tt_a0"), l3_trade_type_arrow0_bear = input.string("", "Arrow 0 Bear Type", group=group_l3, inline="l3_tt_a0")
+l3_trade_type_arrow1_bull = input.string("", "Arrow 1 Bull Type", group=group_l3, inline="l3_tt_a1"), l3_trade_type_arrow1_bear = input.string("", "Arrow 1 Bear Type", group=group_l3, inline="l3_tt_a1")
+l3_trade_type_arrow2_bull = input.string("", "Arrow 2 Bull Type", group=group_l3, inline="l3_tt_a2"), l3_trade_type_arrow2_bear = input.string("", "Arrow 2 Bear Type", group=group_l3, inline="l3_tt_a2")
+l3_trade_type_arrow2_encircled_bull = input.string("", "Arrow 2 Encircled Bull Type", group=group_l3, inline="l3_tt_a2e"), l3_trade_type_arrow2_encircled_bear = input.string("", "Arrow 2 Encircled Bear Type", group=group_l3, inline="l3_tt_a2e")
+l3_trade_type_arrow3_bull = input.string("", "Arrow 3 Bull Type", group=group_l3, inline="l3_tt_a3"), l3_trade_type_arrow3_bear = input.string("", "Arrow 3 Bear Type", group=group_l3, inline="l3_tt_a3")
+l3_trade_type_arrow4_bull = input.string("", "Arrow 4 Bull Type", group=group_l3, inline="l3_tt_a4"), l3_trade_type_arrow4_bear = input.string("", "Arrow 4 Bear Type", group=group_l3, inline="l3_tt_a4")
+l3_trade_type_arrow5_bull = input.string("", "Arrow 5 Bull Type", group=group_l3, inline="l3_tt_a5"), l3_trade_type_arrow5_bear = input.string("", "Arrow 5 Bear Type", group=group_l3, inline="l3_tt_a5")
+l3_trade_type_reversal_bull = input.string("", "Reversal CCI Bull Type", group=group_l3, inline="l3_tt_rev"), l3_trade_type_reversal_bear = input.string("", "Reversal CCI Bear Type", group=group_l3, inline="l3_tt_rev")
+l3_trade_type_reversal_bbp_bull = input.string("", "Reversal BBP Bull Type", group=group_l3, inline="l3_tt_rev_bbp"), l3_trade_type_reversal_bbp_bear = input.string("", "Reversal BBP Bear Type", group=group_l3, inline="l3_tt_rev_bbp")
+l3_trade_type_simul_breakout_bull = input.string("", "Simul Breakout Bull Type", group=group_l3, inline="l3_tt_simul"), l3_trade_type_simul_breakout_bear = input.string("", "Simul Breakout Bear Type", group=group_l3, inline="l3_tt_simul")
+l3BearTextColor = input.color(color.white, "L3 Bear Text Color", group=group_l3), l3BearShapeColor = input.color(color.new(color.purple, 20), "L3 Bear Shape Color", group=group_l3)
+
+group_alert_msg = "Alert Message Content"
+alert_include_ticker = input.bool(true, "Ticker", group=group_alert_msg, inline="alert_content1")
+alert_include_timeframe = input.bool(true, "Timeframe", group=group_alert_msg, inline="alert_content1")
+alert_include_close = input.bool(true, "Close", group=group_alert_msg, inline="alert_content2")
+alert_include_open = input.bool(false, "Open", group=group_alert_msg, inline="alert_content2")
+alert_include_high = input.bool(false, "High", group=group_alert_msg, inline="alert_content2")
+alert_include_low = input.bool(false, "Low", group=group_alert_msg, inline="alert_content2")
+alert_include_maxar = input.bool(false, "MaxaR", group=group_alert_msg, inline="alert_content3")
+alert_include_minar = input.bool(false, "MinaR", group=group_alert_msg, inline="alert_content3")
+
+type SignalSettings
+    bool show_bull
+    bool show_bear
+    int bull_signal
+    int bear_signal
+    string bull_msg
+    string bear_msg
+    string trade_type_bull
+    string trade_type_bear
+
+type LayerSettings
+    bool enable
+    string tf
+    string layer_name
+    color bull_text_color
+    color bull_shape_color
+    color bear_text_color
+    color bear_shape_color
+    SignalSettings cci100
+    SignalSettings cci0
+    SignalSettings cci_100
+    SignalSettings bbp1
+    SignalSettings bbp05
+    SignalSettings bbp0
+    SignalSettings cci_bA
+    SignalSettings cci_bB
+    SignalSettings cci_bC
+    SignalSettings bbp_bA
+    SignalSettings bbp_bB
+    SignalSettings bbp_bC
+    SignalSettings arrow0
+    SignalSettings arrow1
+    SignalSettings arrow2
+    SignalSettings arrow2e
+    SignalSettings arrow3
+    SignalSettings arrow4
+    SignalSettings arrow5
+    SignalSettings reversal_cci
+    SignalSettings reversal_bbp
+    SignalSettings simul_breakout
+
+getLastInt(arr) =>
+	array.size(arr) > 0 ? array.get(arr, array.size(arr) - 1) : na
+getLastFloat(arr) =>
+	array.size(arr) > 0 ? array.get(arr, array.size(arr) - 1) : na
+
+type Compressed
+    string tf
+    bool enable
+    bool op1
+    bool op2
+    bool op3
+    bool op4
+    bool op5
+    bool op6
+	bool op1_2
+    bool op2_2
+    bool op3_2
+    bool op4_2
+    bool op5_2
+    bool op6_2
+    string arrow_reset_tf_ops
+    string arrow_reset_tf_signals
+    string reset_on_cci100_up
+    string reset_on_cci100_down
+    string reset_on_cci0_up
+    string reset_on_cci0_down
+    string reset_on_cci_100_up
+    string reset_on_cci_100_down
+    string reset_on_bbp1_up
+    string reset_on_bbp1_down
+    string reset_on_bbp05_up
+    string reset_on_bbp05_down
+    string reset_on_bbp0_up
+    string reset_on_bbp0_down
+    string reset_on_cci_bA_up
+    string reset_on_cci_bB_up
+    string reset_on_cci_bC_up
+    string reset_on_bbp_bA_up
+    string reset_on_bbp_bB_up
+    string reset_on_bbp_bC_up
+
+type ShowSettings
+    bool show_arrow0_bull
+    bool show_arrow0_bear
+    bool show_arrow1_bull
+    bool show_arrow1_bear
+    bool show_arrow2_bull
+    bool show_arrow2_bear
+    bool show_arrow2_encircled
+    bool show_arrow3_bull
+    bool show_arrow3_bear
+    bool show_arrow4_bull
+    bool show_arrow4_bear
+    bool show_arrow5_bull
+    bool show_arrow5_bear
+    bool show_reversal_bull
+    bool show_reversal_bear
+    bool show_reversal_bbp_bull
+    bool show_reversal_bbp_bear
+    bool show_simul_breakout_bull
+    bool show_simul_breakout_bear
+
+type ResetSettings2
+    string arrow_reset_tf_ops_2
+    string arrow_reset_tf_signals_2
+    string reset_on_cci100_up_2
+    string reset_on_cci100_down_2
+    string reset_on_cci0_up_2
+    string reset_on_cci0_down_2
+    string reset_on_cci_100_up_2
+    string reset_on_cci_100_down_2
+    string reset_on_bbp1_up_2
+    string reset_on_bbp1_down_2
+    string reset_on_bbp05_up_2
+    string reset_on_bbp05_down_2
+    string reset_on_bbp0_up_2
+    string reset_on_bbp0_down_2
+    string reset_on_cci_bA_up_2
+    string reset_on_cci_bB_up_2
+    string reset_on_cci_bC_up_2
+    string reset_on_bbp_bA_up_2
+    string reset_on_bbp_bB_up_2
+    string reset_on_bbp_bC_up_2
+
+
+type SignalData
+    // CCI signals
+    int cci100_up
+    int cci100_down
+    int cci0_up
+    int cci0_down
+    int cci_100_up
+    int cci_100_down
+    // BBP signals
+    int bbp1_up
+    int bbp1_down
+    int bbp05_up
+    int bbp05_down
+    int bbp0_up
+    int bbp0_down
+    // CCI Breakout levels
+    int cci_bA
+    int cci_bB
+    int cci_bC
+    // BBP Breakout levels
+    int bbp_bA
+    int bbp_bB
+    int bbp_bC
+    // Arrow signals (0-5)
+    int arrow0_bull
+    int arrow0_bear
+    int arrow1_bull
+    int arrow1_bear
+    int arrow2_bull
+    int arrow2_bear
+    int arrow2_encircled_bull
+    int arrow2_encircled_bear
+    int arrow3_bull
+    int arrow3_bear
+    int arrow4_bull
+    int arrow4_bear
+    int arrow5_bull
+    int arrow5_bear
+    // Reversal signals
+    int reversal_bull
+    int reversal_bear
+    int reversal_bbp_bull
+    int reversal_bbp_bear
+    // Breakout signals
+    int simul_breakout_bull
+    int simul_breakout_bear
+    // Reference levels (float)
+    float ref_cci_bA
+    float ref_cci_bB
+    float ref_cci_bC
+    float ref_bbp_bA
+    float ref_bbp_bB
+    float ref_bbp_bC
+
+f_get_op_reset_data() =>
+	bbp_val = bbp_val_global
+	// [maxar, minar, _, _, _, _, _, _] = f_python_indicators(src, high, low, close, round_val_input, delta_input)
+
+
+	string reset_bb_region = f_get_bb_region(bbp_val)
+	[bbp_A_event, bbp_B_state, bbp_C_event, reset_bb_region]
+
+
+// —————————————————————————————————————————————————————————————————————————————
+// Core Logic & Computations
+// —————————————————————————————————————————————————————————————————————————————
+
+f_calculateAllSignals(compressed_l1, show_settings, reset_settings_2) =>
+	if not compressed_l1.enable or bar_index < calc_start_bar
+		[0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+	else
+		bbp_val = bbp_val_global
+		cci_val = cci_val_global
+		[maxar, minar, _, _, _, _, _, _] = f_python_indicators(src, high, low, close, round_val_input, delta_input)
+
+		string final_tf_ops = compressed_l1.arrow_reset_tf_ops == "" ? timeframe.period : compressed_l1.arrow_reset_tf_ops
+		[reset_bbp_A_event, reset_bbp_B_state, reset_bbp_C_event, reset_bb_region] = request.security(syminfo.tickerid, final_tf_ops, f_get_op_reset_data(), lookahead=barmerge.lookahead_off)
+		string final_tf_ops_2 = reset_settings_2.arrow_reset_tf_ops_2 == "" ? timeframe.period : reset_settings_2.arrow_reset_tf_ops_2
+		[reset_bbp_A_event_2, reset_bbp_B_state_2, reset_bbp_C_event_2, reset_bb_region_2] = request.security(syminfo.tickerid, final_tf_ops_2, f_get_op_reset_data(), lookahead=barmerge.lookahead_off)
+
+		string final_tf_signals = compressed_l1.arrow_reset_tf_signals == "" ? timeframe.period : compressed_l1.arrow_reset_tf_signals
+		[rsig_cci100_up, rsig_cci100_down, rsig_cci0_up, rsig_cci0_down, rsig_cci_100_up, rsig_cci_100_down, rsig_bbp1_up, rsig_bbp1_down, rsig_bbp05_up, rsig_bbp05_down, rsig_bbp0_up, rsig_bbp0_down, rsig_cci_bA, rsig_cci_bB, rsig_cci_bC, rsig_bbp_bA, rsig_bbp_bB, rsig_bbp_bC] = request.security(syminfo.tickerid, final_tf_signals, f_get_signal_reset_data(src, bbLen, bbMult, cciLen, round_val_input, delta_input), lookahead=barmerge.lookahead_on)
+		string final_tf_signals_2 = reset_settings_2.arrow_reset_tf_signals_2 == "" ? timeframe.period : reset_settings_2.arrow_reset_tf_signals_2
+		[rsig_cci100_up_2, rsig_cci100_down_2, rsig_cci0_up_2, rsig_cci0_down_2, rsig_cci_100_up_2, rsig_cci_100_down_2, rsig_bbp1_up_2, rsig_bbp1_down_2, rsig_bbp05_up_2, rsig_bbp05_down_2, rsig_bbp0_up_2, rsig_bbp0_down_2, rsig_cci_bA_2, rsig_cci_bB_2, rsig_cci_bC_2, rsig_bbp_bA_2, rsig_bbp_bB_2, rsig_bbp_bC_2] = request.security(syminfo.tickerid, final_tf_signals_2, f_get_signal_reset_data(src, bbLen, bbMult, cciLen, round_val_input, delta_input), lookahead=barmerge.lookahead_on)
+
+		sig_cci100_up = cci_crossover_A ? 1 : 0
+		sig_cci100_down = cci_crossunder_A ? -1 : 0
+		sig_cci0_up = cci_crossover_B ? 1 : 0
+		sig_cci0_down = cci_crossunder_B ? -1 : 0
+		sig_cci_100_up = cci_crossover_C ? 1 : 0
+		sig_cci_100_down = cci_crossunder_C ? -1 : 0
+		sig_bbp1_up = bbp_crossover_A ? 1 : 0
+		sig_bbp1_down = bbp_crossunder_A ? -1 : 0
+		sig_bbp05_up = bbp_crossover_B ? 1 : 0
+		sig_bbp05_down = bbp_crossunder_B ? -1 : 0
+		sig_bbp0_up = bbp_crossover_C ? 1 : 0
+		sig_bbp0_down = bbp_crossunder_C ? -1 : 0
+
+		[sig_cci_bA, ref_cci_bA, _, _] = f_cci_breakout_logic(cci_val, 100, maxar, minar, high, low)
+		[sig_cci_bB, ref_cci_bB, _, _] = f_cci_breakout_logic(cci_val, 0, maxar, minar, high, low)
+		[sig_cci_bC, ref_cci_bC, _, _] = f_cci_breakout_logic(cci_val, -100, maxar, minar, high, low)
+		[sig_bbp_bA, ref_bbp_bA, _, _] = f_bbp_breakout_logic(bbp_val, 1, maxar, minar, high, low)
+		[sig_bbp_bB, ref_bbp_bB, _, _] = f_bbp_breakout_logic(bbp_val, 0.5, maxar, minar, high, low)
+		[sig_bbp_bC, ref_bbp_bC, _, _] = f_bbp_breakout_logic(bbp_val, 0, maxar, minar, high, low)
+
+		var int sig_arrow0_bull = 0, var int sig_arrow0_bear = 0, sig_arrow1_bull = 0, sig_arrow1_bear = 0, sig_arrow2_bull = 0, sig_arrow2_bear = 0, sig_arrow2_encircled_bull = 0, sig_arrow2_encircled_bear = 0, sig_arrow3_bull = 0, sig_arrow3_bear = 0, sig_arrow4_bull = 0, sig_arrow4_bear = 0, sig_arrow5_bull = 0, sig_arrow5_bear = 0, sig_simul_breakout_bull = 0, sig_simul_breakout_bear = 0
+
+		if show_settings.show_arrow0_bull or show_settings.show_arrow0_bear
+			[bb, ss] = f_arrow0_signal(bbp_val, cci_val, maxar, minar, high, low, reset_bbp_A_event, reset_bbp_B_state, reset_bbp_C_event, reset_bb_region, compressed_l1.op1, compressed_l1.op2, compressed_l1.op3, compressed_l1.op4, compressed_l1.op5, compressed_l1.op6, compressed_l1.reset_on_cci100_up, compressed_l1.reset_on_cci100_down, compressed_l1.reset_on_cci0_up, compressed_l1.reset_on_cci0_down, compressed_l1.reset_on_cci_100_up, compressed_l1.reset_on_cci_100_down, compressed_l1.reset_on_bbp1_up, compressed_l1.reset_on_bbp1_down, compressed_l1.reset_on_bbp05_up, compressed_l1.reset_on_bbp05_down, compressed_l1.reset_on_bbp0_up, compressed_l1.reset_on_bbp0_down, compressed_l1.reset_on_cci_bA_up, compressed_l1.reset_on_cci_bB_up, compressed_l1.reset_on_cci_bC_up, compressed_l1.reset_on_bbp_bA_up, compressed_l1.reset_on_bbp_bB_up, compressed_l1.reset_on_bbp_bC_up, rsig_cci100_up, rsig_cci100_down, rsig_cci0_up, rsig_cci0_down, rsig_cci_100_up, rsig_cci_100_down, rsig_bbp1_up, rsig_bbp1_down, rsig_bbp05_up, rsig_bbp05_down, rsig_bbp0_up, rsig_bbp0_down, rsig_cci_bA, rsig_cci_bB, rsig_cci_bC, rsig_bbp_bA, rsig_bbp_bB, rsig_bbp_bC, reset_bbp_A_event_2, reset_bbp_B_state_2, reset_bbp_C_event_2, reset_bb_region_2, compressed_l1.op1_2, compressed_l1.op2_2, compressed_l1.op3_2, compressed_l1.op4_2, compressed_l1.op5_2, compressed_l1.op6_2, reset_settings_2.reset_on_cci100_up_2, reset_settings_2.reset_on_cci100_down_2, reset_settings_2.reset_on_cci0_up_2, reset_settings_2.reset_on_cci0_down_2, reset_settings_2.reset_on_cci_100_up_2, reset_settings_2.reset_on_cci_100_down_2, reset_settings_2.reset_on_bbp1_up_2, reset_settings_2.reset_on_bbp1_down_2, reset_settings_2.reset_on_bbp05_up_2, reset_settings_2.reset_on_bbp05_down_2, reset_settings_2.reset_on_bbp0_up_2, reset_settings_2.reset_on_bbp0_down_2, reset_settings_2.reset_on_cci_bA_up_2, reset_settings_2.reset_on_cci_bB_up_2, reset_settings_2.reset_on_cci_bC_up_2, reset_settings_2.reset_on_bbp_bA_up_2, reset_settings_2.reset_on_bbp_bB_up_2, reset_settings_2.reset_on_bbp_bC_up_2, rsig_cci100_up_2, rsig_cci100_down_2, rsig_cci0_up_2, rsig_cci0_down_2, rsig_cci_100_up_2, rsig_cci_100_down_2, rsig_bbp1_up_2, rsig_bbp1_down_2, rsig_bbp05_up_2, rsig_bbp05_down_2, rsig_bbp0_up_2, rsig_bbp0_down_2, rsig_cci_bA_2, rsig_cci_bB_2, rsig_cci_bC_2, rsig_bbp_bA_2, rsig_bbp_bB_2, rsig_bbp_bC_2)
+			sig_arrow0_bull := bb
+			sig_arrow0_bear := ss
+		if show_settings.show_arrow1_bull or show_settings.show_arrow1_bear
+			[bb, ss] = f_arrow1_signal(bbp_val, cci_val, maxar, minar, high, low, reset_bbp_A_event, reset_bbp_B_state, reset_bbp_C_event, reset_bb_region, compressed_l1.op1, compressed_l1.op2, compressed_l1.op3, compressed_l1.op4, compressed_l1.op5, compressed_l1.op6, compressed_l1.reset_on_cci100_up, compressed_l1.reset_on_cci100_down, compressed_l1.reset_on_cci0_up, compressed_l1.reset_on_cci0_down, compressed_l1.reset_on_cci_100_up, compressed_l1.reset_on_cci_100_down, compressed_l1.reset_on_bbp1_up, compressed_l1.reset_on_bbp1_down, compressed_l1.reset_on_bbp05_up, compressed_l1.reset_on_bbp05_down, compressed_l1.reset_on_bbp0_up, compressed_l1.reset_on_bbp0_down, compressed_l1.reset_on_cci_bA_up, compressed_l1.reset_on_cci_bB_up, compressed_l1.reset_on_cci_bC_up, compressed_l1.reset_on_bbp_bA_up, compressed_l1.reset_on_bbp_bB_up, compressed_l1.reset_on_bbp_bC_up, rsig_cci100_up, rsig_cci100_down, rsig_cci0_up, rsig_cci0_down, rsig_cci_100_up, rsig_cci_100_down, rsig_bbp1_up, rsig_bbp1_down, rsig_bbp05_up, rsig_bbp05_down, rsig_bbp0_up, rsig_bbp0_down, rsig_cci_bA, rsig_cci_bB, rsig_cci_bC, rsig_bbp_bA, rsig_bbp_bB, rsig_bbp_bC, reset_bbp_A_event_2, reset_bbp_B_state_2, reset_bbp_C_event_2, reset_bb_region_2, compressed_l1.op1_2, compressed_l1.op2_2, compressed_l1.op3_2, compressed_l1.op4_2, compressed_l1.op5_2, compressed_l1.op6_2, reset_settings_2.reset_on_cci100_up_2, reset_settings_2.reset_on_cci100_down_2, reset_settings_2.reset_on_cci0_up_2, reset_settings_2.reset_on_cci0_down_2, reset_settings_2.reset_on_cci_100_up_2, reset_settings_2.reset_on_cci_100_down_2, reset_settings_2.reset_on_bbp1_up_2, reset_settings_2.reset_on_bbp1_down_2, reset_settings_2.reset_on_bbp05_up_2, reset_settings_2.reset_on_bbp05_down_2, reset_settings_2.reset_on_bbp0_up_2, reset_settings_2.reset_on_bbp0_down_2, reset_settings_2.reset_on_cci_bA_up_2, reset_settings_2.reset_on_cci_bB_up_2, reset_settings_2.reset_on_cci_bC_up_2, reset_settings_2.reset_on_bbp_bA_up_2, reset_settings_2.reset_on_bbp_bB_up_2, reset_settings_2.reset_on_bbp_bC_up_2, rsig_cci100_up_2, rsig_cci100_down_2, rsig_cci0_up_2, rsig_cci0_down_2, rsig_cci_100_up_2, rsig_cci_100_down_2, rsig_bbp1_up_2, rsig_bbp1_down_2, rsig_bbp05_up_2, rsig_bbp05_down_2, rsig_bbp0_up_2, rsig_bbp0_down_2, rsig_cci_bA_2, rsig_cci_bB_2, rsig_cci_bC_2, rsig_bbp_bA_2, rsig_bbp_bB_2, rsig_bbp_bC_2)
+			sig_arrow1_bull := bb
+			sig_arrow1_bear := ss
+
+		if show_settings.show_arrow2_bull or show_settings.show_arrow2_bear or show_settings.show_arrow2_encircled
+			[bb, ss, a1, a2] = f_arrow2_signal(bbp_val, cci_val, maxar, minar, high, low, reset_bbp_A_event, reset_bbp_B_state, reset_bbp_C_event, reset_bb_region, compressed_l1.op1, compressed_l1.op2, compressed_l1.op3, compressed_l1.op4, compressed_l1.op5, compressed_l1.op6, compressed_l1.reset_on_cci100_up, compressed_l1.reset_on_cci100_down, compressed_l1.reset_on_cci0_up, compressed_l1.reset_on_cci0_down, compressed_l1.reset_on_cci_100_up, compressed_l1.reset_on_cci_100_down, compressed_l1.reset_on_bbp1_up, compressed_l1.reset_on_bbp1_down, compressed_l1.reset_on_bbp05_up, compressed_l1.reset_on_bbp05_down, compressed_l1.reset_on_bbp0_up, compressed_l1.reset_on_bbp0_down, compressed_l1.reset_on_cci_bA_up, compressed_l1.reset_on_cci_bB_up, compressed_l1.reset_on_cci_bC_up, compressed_l1.reset_on_bbp_bA_up, compressed_l1.reset_on_bbp_bB_up, compressed_l1.reset_on_bbp_bC_up, rsig_cci100_up, rsig_cci100_down, rsig_cci0_up, rsig_cci0_down, rsig_cci_100_up, rsig_cci_100_down, rsig_bbp1_up, rsig_bbp1_down, rsig_bbp05_up, rsig_bbp05_down, rsig_bbp0_up, rsig_bbp0_down, rsig_cci_bA, rsig_cci_bB, rsig_cci_bC, rsig_bbp_bA, rsig_bbp_bB, rsig_bbp_bC, reset_bbp_A_event_2, reset_bbp_B_state_2, reset_bbp_C_event_2, reset_bb_region_2, compressed_l1.op1_2, compressed_l1.op2_2, compressed_l1.op3_2, compressed_l1.op4_2, compressed_l1.op5_2, compressed_l1.op6_2, reset_settings_2.reset_on_cci100_up_2, reset_settings_2.reset_on_cci100_down_2, reset_settings_2.reset_on_cci0_up_2, reset_settings_2.reset_on_cci0_down_2, reset_settings_2.reset_on_cci_100_up_2, reset_settings_2.reset_on_cci_100_down_2, reset_settings_2.reset_on_bbp1_up_2, reset_settings_2.reset_on_bbp1_down_2, reset_settings_2.reset_on_bbp05_up_2, reset_settings_2.reset_on_bbp05_down_2, reset_settings_2.reset_on_bbp0_up_2, reset_settings_2.reset_on_bbp0_down_2, reset_settings_2.reset_on_cci_bA_up_2, reset_settings_2.reset_on_cci_bB_up_2, reset_settings_2.reset_on_cci_bC_up_2, reset_settings_2.reset_on_bbp_bA_up_2, reset_settings_2.reset_on_bbp_bB_up_2, reset_settings_2.reset_on_bbp_bC_up_2, rsig_cci100_up_2, rsig_cci100_down_2, rsig_cci0_up_2, rsig_cci0_down_2, rsig_cci_100_up_2, rsig_cci_100_down_2, rsig_bbp1_up_2, rsig_bbp1_down_2, rsig_bbp05_up_2, rsig_bbp05_down_2, rsig_bbp0_up_2, rsig_bbp0_down_2, rsig_cci_bA_2, rsig_cci_bB_2, rsig_cci_bC_2, rsig_bbp_bA_2, rsig_bbp_bB_2, rsig_bbp_bC_2)
+			sig_arrow2_bull := bb
+			sig_arrow2_bear := ss
+			sig_arrow2_encircled_bull := a1
+			sig_arrow2_encircled_bear := a2
+
+		if show_settings.show_arrow3_bull or show_settings.show_arrow3_bear
+			[bb, ss] = f_arrow3_signal(bbp_val, cci_val, maxar, minar, high, low, reset_bbp_A_event, reset_bbp_B_state, reset_bbp_C_event, reset_bb_region, compressed_l1.op1, compressed_l1.op2, compressed_l1.op3, compressed_l1.op4, compressed_l1.op5, compressed_l1.op6, compressed_l1.reset_on_cci100_up, compressed_l1.reset_on_cci100_down, compressed_l1.reset_on_cci0_up, compressed_l1.reset_on_cci0_down, compressed_l1.reset_on_cci_100_up, compressed_l1.reset_on_cci_100_down, compressed_l1.reset_on_bbp1_up, compressed_l1.reset_on_bbp1_down, compressed_l1.reset_on_bbp05_up, compressed_l1.reset_on_bbp05_down, compressed_l1.reset_on_bbp0_up, compressed_l1.reset_on_bbp0_down, compressed_l1.reset_on_cci_bA_up, compressed_l1.reset_on_cci_bB_up, compressed_l1.reset_on_cci_bC_up, compressed_l1.reset_on_bbp_bA_up, compressed_l1.reset_on_bbp_bB_up, compressed_l1.reset_on_bbp_bC_up, rsig_cci100_up, rsig_cci100_down, rsig_cci0_up, rsig_cci0_down, rsig_cci_100_up, rsig_cci_100_down, rsig_bbp1_up, rsig_bbp1_down, rsig_bbp05_up, rsig_bbp05_down, rsig_bbp0_up, rsig_bbp0_down, rsig_cci_bA, rsig_cci_bB, rsig_cci_bC, rsig_bbp_bA, rsig_bbp_bB, rsig_bbp_bC, reset_bbp_A_event_2, reset_bbp_B_state_2, reset_bbp_C_event_2, reset_bb_region_2, compressed_l1.op1_2, compressed_l1.op2_2, compressed_l1.op3_2, compressed_l1.op4_2, compressed_l1.op5_2, compressed_l1.op6_2, reset_settings_2.reset_on_cci100_up_2, reset_settings_2.reset_on_cci100_down_2, reset_settings_2.reset_on_cci0_up_2, reset_settings_2.reset_on_cci0_down_2, reset_settings_2.reset_on_cci_100_up_2, reset_settings_2.reset_on_cci_100_down_2, reset_settings_2.reset_on_bbp1_up_2, reset_settings_2.reset_on_bbp1_down_2, reset_settings_2.reset_on_bbp05_up_2, reset_settings_2.reset_on_bbp05_down_2, reset_settings_2.reset_on_bbp0_up_2, reset_settings_2.reset_on_bbp0_down_2, reset_settings_2.reset_on_cci_bA_up_2, reset_settings_2.reset_on_cci_bB_up_2, reset_settings_2.reset_on_cci_bC_up_2, reset_settings_2.reset_on_bbp_bA_up_2, reset_settings_2.reset_on_bbp_bB_up_2, reset_settings_2.reset_on_bbp_bC_up_2, rsig_cci100_up_2, rsig_cci100_down_2, rsig_cci0_up_2, rsig_cci0_down_2, rsig_cci_100_up_2, rsig_cci_100_down_2, rsig_bbp1_up_2, rsig_bbp1_down_2, rsig_bbp05_up_2, rsig_bbp05_down_2, rsig_bbp0_up_2, rsig_bbp0_down_2, rsig_cci_bA_2, rsig_cci_bB_2, rsig_cci_bC_2, rsig_bbp_bA_2, rsig_bbp_bB_2, rsig_bbp_bC_2)
+			sig_arrow3_bull := bb
+			sig_arrow3_bear := ss
+
+		if show_settings.show_arrow4_bull or show_settings.show_arrow4_bear
+			[bb, ss] = f_arrow4_signal(bbp_val, cci_val, maxar, minar, high, low, reset_bbp_A_event, reset_bbp_B_state, reset_bbp_C_event, reset_bb_region, compressed_l1.op1, compressed_l1.op2, compressed_l1.op3, compressed_l1.op4, compressed_l1.op5, compressed_l1.op6, compressed_l1.reset_on_cci100_up, compressed_l1.reset_on_cci100_down, compressed_l1.reset_on_cci0_up, compressed_l1.reset_on_cci0_down, compressed_l1.reset_on_cci_100_up, compressed_l1.reset_on_cci_100_down, compressed_l1.reset_on_bbp1_up, compressed_l1.reset_on_bbp1_down, compressed_l1.reset_on_bbp05_up, compressed_l1.reset_on_bbp05_down, compressed_l1.reset_on_bbp0_up, compressed_l1.reset_on_bbp0_down, compressed_l1.reset_on_cci_bA_up, compressed_l1.reset_on_cci_bB_up, compressed_l1.reset_on_cci_bC_up, compressed_l1.reset_on_bbp_bA_up, compressed_l1.reset_on_bbp_bB_up, compressed_l1.reset_on_bbp_bC_up, rsig_cci100_up, rsig_cci100_down, rsig_cci0_up, rsig_cci0_down, rsig_cci_100_up, rsig_cci_100_down, rsig_bbp1_up, rsig_bbp1_down, rsig_bbp05_up, rsig_bbp05_down, rsig_bbp0_up, rsig_bbp0_down, rsig_cci_bA, rsig_cci_bB, rsig_cci_bC, rsig_bbp_bA, rsig_bbp_bB, rsig_bbp_bC, reset_bbp_A_event_2, reset_bbp_B_state_2, reset_bbp_C_event_2, reset_bb_region_2, compressed_l1.op1_2, compressed_l1.op2_2, compressed_l1.op3_2, compressed_l1.op4_2, compressed_l1.op5_2, compressed_l1.op6_2, reset_settings_2.reset_on_cci100_up_2, reset_settings_2.reset_on_cci100_down_2, reset_settings_2.reset_on_cci0_up_2, reset_settings_2.reset_on_cci0_down_2, reset_settings_2.reset_on_cci_100_up_2, reset_settings_2.reset_on_cci_100_down_2, reset_settings_2.reset_on_bbp1_up_2, reset_settings_2.reset_on_bbp1_down_2, reset_settings_2.reset_on_bbp05_up_2, reset_settings_2.reset_on_bbp05_down_2, reset_settings_2.reset_on_bbp0_up_2, reset_settings_2.reset_on_bbp0_down_2, reset_settings_2.reset_on_cci_bA_up_2, reset_settings_2.reset_on_cci_bB_up_2, reset_settings_2.reset_on_cci_bC_up_2, reset_settings_2.reset_on_bbp_bA_up_2, reset_settings_2.reset_on_bbp_bB_up_2, reset_settings_2.reset_on_bbp_bC_up_2, rsig_cci100_up_2, rsig_cci100_down_2, rsig_cci0_up_2, rsig_cci0_down_2, rsig_cci_100_up_2, rsig_cci_100_down_2, rsig_bbp1_up_2, rsig_bbp1_down_2, rsig_bbp05_up_2, rsig_bbp05_down_2, rsig_bbp0_up_2, rsig_bbp0_down_2, rsig_cci_bA_2, rsig_cci_bB_2, rsig_cci_bC_2, rsig_bbp_bA_2, rsig_bbp_bB_2, rsig_bbp_bC_2)
+			sig_arrow4_bull := bb
+			sig_arrow4_bear := ss
+
+		if show_settings.show_arrow5_bull or show_settings.show_arrow5_bear
+			[bb, ss] = f_arrow5_signal(bbp_val, cci_val, maxar, minar, high, low, reset_bbp_A_event, reset_bbp_B_state, reset_bbp_C_event, reset_bb_region, compressed_l1.op1, compressed_l1.op2, compressed_l1.op3, compressed_l1.op4, compressed_l1.op5, compressed_l1.op6, compressed_l1.reset_on_cci100_up, compressed_l1.reset_on_cci100_down, compressed_l1.reset_on_cci0_up, compressed_l1.reset_on_cci0_down, compressed_l1.reset_on_cci_100_up, compressed_l1.reset_on_cci_100_down, compressed_l1.reset_on_bbp1_up, compressed_l1.reset_on_bbp1_down, compressed_l1.reset_on_bbp05_up, compressed_l1.reset_on_bbp05_down, compressed_l1.reset_on_bbp0_up, compressed_l1.reset_on_bbp0_down, compressed_l1.reset_on_cci_bA_up, compressed_l1.reset_on_cci_bB_up, compressed_l1.reset_on_cci_bC_up, compressed_l1.reset_on_bbp_bA_up, compressed_l1.reset_on_bbp_bB_up, compressed_l1.reset_on_bbp_bC_up, rsig_cci100_up, rsig_cci100_down, rsig_cci0_up, rsig_cci0_down, rsig_cci_100_up, rsig_cci_100_down, rsig_bbp1_up, rsig_bbp1_down, rsig_bbp05_up, rsig_bbp05_down, rsig_bbp0_up, rsig_bbp0_down, rsig_cci_bA, rsig_cci_bB, rsig_cci_bC, rsig_bbp_bA, rsig_bbp_bB, rsig_bbp_bC, reset_bbp_A_event_2, reset_bbp_B_state_2, reset_bbp_C_event_2, reset_bb_region_2, compressed_l1.op1_2, compressed_l1.op2_2, compressed_l1.op3_2, compressed_l1.op4_2, compressed_l1.op5_2, compressed_l1.op6_2, reset_settings_2.reset_on_cci100_up_2, reset_settings_2.reset_on_cci100_down_2, reset_settings_2.reset_on_cci0_up_2, reset_settings_2.reset_on_cci0_down_2, reset_settings_2.reset_on_cci_100_up_2, reset_settings_2.reset_on_cci_100_down_2, reset_settings_2.reset_on_bbp1_up_2, reset_settings_2.reset_on_bbp1_down_2, reset_settings_2.reset_on_bbp05_up_2, reset_settings_2.reset_on_bbp05_down_2, reset_settings_2.reset_on_bbp0_up_2, reset_settings_2.reset_on_bbp0_down_2, reset_settings_2.reset_on_cci_bA_up_2, reset_settings_2.reset_on_cci_bB_up_2, reset_settings_2.reset_on_cci_bC_up_2, reset_settings_2.reset_on_bbp_bA_up_2, reset_settings_2.reset_on_bbp_bB_up_2, reset_settings_2.reset_on_bbp_bC_up_2, rsig_cci100_up_2, rsig_cci100_down_2, rsig_cci0_up_2, rsig_cci0_down_2, rsig_cci_100_up_2, rsig_cci_100_down_2, rsig_bbp1_up_2, rsig_bbp1_down_2, rsig_bbp05_up_2, rsig_bbp05_down_2, rsig_bbp0_up_2, rsig_bbp0_down_2, rsig_cci_bA_2, rsig_cci_bB_2, rsig_cci_bC_2, rsig_bbp_bA_2, rsig_bbp_bB_2, rsig_bbp_bC_2)
+			sig_arrow5_bull := bb
+			sig_arrow5_bear := ss
+
+		if show_settings.show_simul_breakout_bull or show_settings.show_simul_breakout_bear
+			[bb, ss] = f_simul_breakout(sig_bbp_bA, sig_cci_bA, sig_bbp_bC, sig_cci_bC, reset_bbp_A_event, reset_bbp_B_state, reset_bbp_C_event, reset_bb_region, compressed_l1.op1, compressed_l1.op2, compressed_l1.op3, compressed_l1.op4, compressed_l1.op5, compressed_l1.op6, compressed_l1.reset_on_cci100_up, compressed_l1.reset_on_cci100_down, compressed_l1.reset_on_cci0_up, compressed_l1.reset_on_cci0_down, compressed_l1.reset_on_cci_100_up, compressed_l1.reset_on_cci_100_down, compressed_l1.reset_on_bbp1_up, compressed_l1.reset_on_bbp1_down, compressed_l1.reset_on_bbp05_up, compressed_l1.reset_on_bbp05_down, compressed_l1.reset_on_bbp0_up, compressed_l1.reset_on_bbp0_down, compressed_l1.reset_on_cci_bA_up, compressed_l1.reset_on_cci_bB_up, compressed_l1.reset_on_cci_bC_up, compressed_l1.reset_on_bbp_bA_up, compressed_l1.reset_on_bbp_bB_up, compressed_l1.reset_on_bbp_bC_up, rsig_cci100_up, rsig_cci100_down, rsig_cci0_up, rsig_cci0_down, rsig_cci_100_up, rsig_cci_100_down, rsig_bbp1_up, rsig_bbp1_down, rsig_bbp05_up, rsig_bbp05_down, rsig_bbp0_up, rsig_bbp0_down, rsig_cci_bA, rsig_cci_bB, rsig_cci_bC, rsig_bbp_bA, rsig_bbp_bB, rsig_bbp_bC, reset_bbp_A_event_2, reset_bbp_B_state_2, reset_bbp_C_event_2, reset_bb_region_2, compressed_l1.op1_2, compressed_l1.op2_2, compressed_l1.op3_2, compressed_l1.op4_2, compressed_l1.op5_2, compressed_l1.op6_2, reset_settings_2.reset_on_cci100_up_2, reset_settings_2.reset_on_cci100_down_2, reset_settings_2.reset_on_cci0_up_2, reset_settings_2.reset_on_cci0_down_2, reset_settings_2.reset_on_cci_100_up_2, reset_settings_2.reset_on_cci_100_down_2, reset_settings_2.reset_on_bbp1_up_2, reset_settings_2.reset_on_bbp1_down_2, reset_settings_2.reset_on_bbp05_up_2, reset_settings_2.reset_on_bbp05_down_2, reset_settings_2.reset_on_bbp0_up_2, reset_settings_2.reset_on_bbp0_down_2, reset_settings_2.reset_on_cci_bA_up_2, reset_settings_2.reset_on_cci_bB_up_2, reset_settings_2.reset_on_cci_bC_up_2, reset_settings_2.reset_on_bbp_bA_up_2, reset_settings_2.reset_on_bbp_bB_up_2, reset_settings_2.reset_on_bbp_bC_up_2, rsig_cci100_up_2, rsig_cci100_down_2, rsig_cci0_up_2, rsig_cci0_down_2, rsig_cci_100_up_2, rsig_cci_100_down_2, rsig_bbp1_up_2, rsig_bbp1_down_2, rsig_bbp05_up_2, rsig_bbp05_down_2, rsig_bbp0_up_2, rsig_bbp0_down_2, rsig_cci_bA_2, rsig_cci_bB_2, rsig_cci_bC_2, rsig_bbp_bA_2, rsig_bbp_bB_2, rsig_bbp_bC_2)
+			sig_simul_breakout_bull := bb
+			sig_simul_breakout_bear := ss
+
+		[sig_reversal_bull, sig_reversal_bear] = f_reversal_signal_cci(cci_val, maxar, minar, high, low)
+		[sig_reversal_bbp_bull, sig_reversal_bbp_bear] = f_reversal_signal_bbp(bbp_val, maxar, minar, high, low)
+		if not barstate.isconfirmed
+			[0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+		else
+			[sig_cci100_up, sig_cci100_down, sig_cci0_up, sig_cci0_down, sig_cci_100_up, sig_cci_100_down, sig_bbp1_up, sig_bbp1_down, sig_bbp05_up, sig_bbp05_down, sig_bbp0_up, sig_bbp0_down, sig_cci_bA, sig_cci_bB, sig_cci_bC, sig_bbp_bA, sig_bbp_bB, sig_bbp_bC, sig_arrow0_bull, sig_arrow0_bear, sig_arrow1_bull, sig_arrow1_bear, sig_arrow2_bull, sig_arrow2_bear, sig_arrow2_encircled_bull, sig_arrow2_encircled_bear, sig_arrow3_bull, sig_arrow3_bear, sig_arrow4_bull, sig_arrow4_bear, sig_arrow5_bull, sig_arrow5_bear, sig_reversal_bull, sig_reversal_bear, sig_reversal_bbp_bull, sig_reversal_bbp_bear, sig_simul_breakout_bull, sig_simul_breakout_bear]
+
+f_security_call(compressed_l1_, show_settings, reset_settings_2) =>
+	is_lower_tf = timeframe.in_seconds(compressed_l1_.tf) <= timeframe.in_seconds(timeframe.period)
+	option = compressed_l1_.tf == "" ? timeframe.period : compressed_l1_.tf
+    // If the bar index is before the start bar, return empty data immediately.
+    if bar_index < calc_start_bar or not compressed_l1_.enable
+        [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+	else if is_lower_tf
+		[cci100_up, cci100_down, cci0_up, cci0_down, cci_100_up, cci_100_down, bbp1_up, bbp1_down, bbp05_up, bbp05_down, bbp0_up, bbp0_down, cci_bA, cci_bB, cci_bC, bbp_bA, bbp_bB, bbp_bC, arrow0_bull, arrow0_bear, arrow1_bull, arrow1_bear, arrow2_bull, arrow2_bear, arrow2_encircled_bull, arrow2_encircled_bear, arrow3_bull, arrow3_bear, arrow4_bull, arrow4_bear, arrow5_bull, arrow5_bear, reversal_bull, reversal_bear, reversal_bbp_bull, reversal_bbp_bear, simul_breakout_bull, simul_breakout_bear] = request.security_lower_tf(syminfo.tickerid, option, f_calculateAllSignals(compressed_l1_, show_settings, reset_settings_2))
+
+		// Initialize aggregation variables
+		agg_cci100_up = 0, agg_cci100_down = 0, agg_cci0_up = 0, agg_cci0_down = 0, agg_cci_100_up = 0, agg_cci_100_down = 0, agg_bbp1_up = 0, agg_bbp1_down = 0, agg_bbp05_up = 0, agg_bbp05_down = 0, agg_bbp0_up = 0, agg_bbp0_down = 0, agg_cci_bA = 0, agg_cci_bB = 0, agg_cci_bC = 0, agg_bbp_bA = 0, agg_bbp_bB = 0, agg_bbp_bC = 0, agg_arrow0_bull = 0, agg_arrow0_bear = 0, agg_arrow1_bull = 0, agg_arrow1_bear = 0, agg_arrow2_bull = 0, agg_arrow2_bear = 0, agg_arrow2_encircled_bull = 0, agg_arrow2_encircled_bear = 0, agg_arrow3_bull = 0, agg_arrow3_bear = 0, agg_arrow4_bull = 0, agg_arrow4_bear = 0, agg_arrow5_bull = 0, agg_arrow5_bear = 0, agg_reversal_bull = 0, agg_reversal_bear = 0, agg_reversal_bbp_bull = 0, agg_reversal_bbp_bear = 0, agg_simul_breakout_bull = 0, agg_simul_breakout_bear = 0
+
+		if array.size(cci100_up) > 0
+			for i = 0 to array.size(cci100_up) - 1
+				agg_cci100_up := agg_cci100_up != 0 ? agg_cci100_up : array.get(cci100_up, i)
+				agg_cci100_down := agg_cci100_down != 0 ? agg_cci100_down : array.get(cci100_down, i)
+				agg_cci0_up := agg_cci0_up != 0 ? agg_cci0_up : array.get(cci0_up, i)
+				agg_cci0_down := agg_cci0_down != 0 ? agg_cci0_down : array.get(cci0_down, i)
+				agg_cci_100_up := agg_cci_100_up != 0 ? agg_cci_100_up : array.get(cci_100_up, i)
+				agg_cci_100_down := agg_cci_100_down != 0 ? agg_cci_100_down : array.get(cci_100_down, i)
+				agg_bbp1_up := agg_bbp1_up != 0 ? agg_bbp1_up : array.get(bbp1_up, i)
+				agg_bbp1_down := agg_bbp1_down != 0 ? agg_bbp1_down : array.get(bbp1_down, i)
+				agg_bbp05_up := agg_bbp05_up != 0 ? agg_bbp05_up : array.get(bbp05_up, i)
+				agg_bbp05_down := agg_bbp05_down != 0 ? agg_bbp05_down : array.get(bbp05_down, i)
+				agg_bbp0_up := agg_bbp0_up != 0 ? agg_bbp0_up : array.get(bbp0_up, i)
+				agg_bbp0_down := agg_bbp0_down != 0 ? agg_bbp0_down : array.get(bbp0_down, i)
+				agg_cci_bA := agg_cci_bA != 0 ? agg_cci_bA : array.get(cci_bA, i)
+				agg_cci_bB := agg_cci_bB != 0 ? agg_cci_bB : array.get(cci_bB, i)
+				agg_cci_bC := agg_cci_bC != 0 ? agg_cci_bC : array.get(cci_bC, i)
+				agg_bbp_bA := agg_bbp_bA != 0 ? agg_bbp_bA : array.get(bbp_bA, i)
+				agg_bbp_bB := agg_bbp_bB != 0 ? agg_bbp_bB : array.get(bbp_bB, i)
+				agg_bbp_bC := agg_bbp_bC != 0 ? agg_bbp_bC : array.get(bbp_bC, i)
+				agg_arrow0_bull := agg_arrow0_bull != 0 ? agg_arrow0_bull : array.get(arrow0_bull, i)
+				agg_arrow0_bear := agg_arrow0_bear != 0 ? agg_arrow0_bear : array.get(arrow0_bear, i)
+				agg_arrow1_bull := agg_arrow1_bull != 0 ? agg_arrow1_bull : array.get(arrow1_bull, i)
+				agg_arrow1_bear := agg_arrow1_bear != 0 ? agg_arrow1_bear : array.get(arrow1_bear, i)
+				agg_arrow2_bull := agg_arrow2_bull != 0 ? agg_arrow2_bull : array.get(arrow2_bull, i)
+				agg_arrow2_bear := agg_arrow2_bear != 0 ? agg_arrow2_bear : array.get(arrow2_bear, i)
+				agg_arrow2_encircled_bull := agg_arrow2_encircled_bull != 0 ? agg_arrow2_encircled_bull : array.get(arrow2_encircled_bull, i)
+				agg_arrow2_encircled_bear := agg_arrow2_encircled_bear != 0 ? agg_arrow2_encircled_bear : array.get(arrow2_encircled_bear, i)
+				agg_arrow3_bull := agg_arrow3_bull != 0 ? agg_arrow3_bull : array.get(arrow3_bull, i)
+				agg_arrow3_bear := agg_arrow3_bear != 0 ? agg_arrow3_bear : array.get(arrow3_bear, i)
+				agg_arrow4_bull := agg_arrow4_bull != 0 ? agg_arrow4_bull : array.get(arrow4_bull, i)
+				agg_arrow4_bear := agg_arrow4_bear != 0 ? agg_arrow4_bear : array.get(arrow4_bear, i)
+				agg_arrow5_bull := agg_arrow5_bull != 0 ? agg_arrow5_bull : array.get(arrow5_bull, i)
+				agg_arrow5_bear := agg_arrow5_bear != 0 ? agg_arrow5_bear : array.get(arrow5_bear, i)
+				agg_reversal_bull := agg_reversal_bull != 0 ? agg_reversal_bull : array.get(reversal_bull, i)
+				agg_reversal_bear := agg_reversal_bear != 0 ? agg_reversal_bear : array.get(reversal_bear, i)
+				agg_reversal_bbp_bull := agg_reversal_bbp_bull != 0 ? agg_reversal_bbp_bull : array.get(reversal_bbp_bull, i)
+				agg_reversal_bbp_bear := agg_reversal_bbp_bear != 0 ? agg_reversal_bbp_bear : array.get(reversal_bbp_bear, i)
+				agg_simul_breakout_bull := agg_simul_breakout_bull != 0 ? agg_simul_breakout_bull : array.get(simul_breakout_bull, i)
+				agg_simul_breakout_bear := agg_simul_breakout_bear != 0 ? agg_simul_breakout_bear : array.get(simul_breakout_bear, i)
+		[agg_cci100_up, agg_cci100_down, agg_cci0_up, agg_cci0_down, agg_cci_100_up, agg_cci_100_down, agg_bbp1_up, agg_bbp1_down, agg_bbp05_up, agg_bbp05_down, agg_bbp0_up, agg_bbp0_down, agg_cci_bA, agg_cci_bB, agg_cci_bC, agg_bbp_bA, agg_bbp_bB, agg_bbp_bC, agg_arrow0_bull, agg_arrow0_bear, agg_arrow1_bull, agg_arrow1_bear, agg_arrow2_bull, agg_arrow2_bear, agg_arrow2_encircled_bull, agg_arrow2_encircled_bear, agg_arrow3_bull, agg_arrow3_bear, agg_arrow4_bull, agg_arrow4_bear, agg_arrow5_bull, agg_arrow5_bear, agg_reversal_bull, agg_reversal_bear, agg_reversal_bbp_bull, agg_reversal_bbp_bear, agg_simul_breakout_bull, agg_simul_breakout_bear]
+	else
+		[cci100_up, cci100_down, cci0_up, cci0_down, cci_100_up, cci_100_down, bbp1_up, bbp1_down, bbp05_up, bbp05_down, bbp0_up, bbp0_down, cci_bA, cci_bB, cci_bC, bbp_bA, bbp_bB, bbp_bC, arrow0_bull, arrow0_bear, arrow1_bull, arrow1_bear, arrow2_bull, arrow2_bear, arrow2_encircled_bull, arrow2_encircled_bear, arrow3_bull, arrow3_bear, arrow4_bull, arrow4_bear, arrow5_bull, arrow5_bear, reversal_bull, reversal_bear, reversal_bbp_bull, reversal_bbp_bear, simul_breakout_bull, simul_breakout_bear] = request.security(syminfo.tickerid, option, f_calculateAllSignals(compressed_l1_, show_settings, reset_settings_2), lookahead=barmerge.lookahead_on)
+		[cci100_up, cci100_down, cci0_up, cci0_down, cci_100_up, cci_100_down, bbp1_up, bbp1_down, bbp05_up, bbp05_down, bbp0_up, bbp0_down, cci_bA, cci_bB, cci_bC, bbp_bA, bbp_bB, bbp_bC, arrow0_bull, arrow0_bear, arrow1_bull, arrow1_bear, arrow2_bull, arrow2_bear, arrow2_encircled_bull, arrow2_encircled_bear, arrow3_bull, arrow3_bear, arrow4_bull, arrow4_bear, arrow5_bull, arrow5_bear, reversal_bull, reversal_bear, reversal_bbp_bull, reversal_bbp_bear, simul_breakout_bull, simul_breakout_bear]
+
+// compressed_l1 = Compressed.new(tfL1, enableL1, op1, op2, op3, op4, op5, op6, op1_2, op2_2, op3_2, op4_2, op5_2, op6_2, arrow_reset_tf_ops, arrow_reset_tf_signals, reset_on_cci100_up, reset_on_cci100_down, reset_on_cci0_up, reset_on_cci0_down, reset_on_cci_100_up, reset_on_cci_100_down, reset_on_bbp1_up, reset_on_bbp1_down, reset_on_bbp05_up, reset_on_bbp05_down, reset_on_bbp0_up, reset_on_bbp0_down, reset_on_cci_bA_up, reset_on_cci_bB_up, reset_on_cci_bC_up, reset_on_bbp_bA_up, reset_on_bbp_bB_up, reset_on_bbp_bC_up)
+// compressed_l2 = Compressed.new(tfL2, enableL2, op1, op2, op3, op4, op5, op6, op1_2, op2_2, op3_2, op4_2, op5_2, op6_2, arrow_reset_tf_ops, arrow_reset_tf_signals, reset_on_cci100_up, reset_on_cci100_down, reset_on_cci0_up, reset_on_cci0_down, reset_on_cci_100_up, reset_on_cci_100_down, reset_on_bbp1_up, reset_on_bbp1_down, reset_on_bbp05_up, reset_on_bbp05_down, reset_on_bbp0_up, reset_on_bbp0_down, reset_on_cci_bA_up, reset_on_cci_bB_up, reset_on_cci_bC_up, reset_on_bbp_bA_up, reset_on_bbp_bB_up, reset_on_bbp_bC_up)
+// compressed_l3 = Compressed.new(tfL3, enableL3, op1, op2, op3, op4, op5, op6, op1_2, op2_2, op3_2, op4_2, op5_2, op6_2, arrow_reset_tf_ops, arrow_reset_tf_signals, reset_on_cci100_up, reset_on_cci100_down, reset_on_cci0_up, reset_on_cci0_down, reset_on_cci_100_up, reset_on_cci_100_down, reset_on_bbp1_up, reset_on_bbp1_down, reset_on_bbp05_up, reset_on_bbp05_down, reset_on_bbp0_up, reset_on_bbp0_down, reset_on_cci_bA_up, reset_on_cci_bB_up, reset_on_cci_bC_up, reset_on_bbp_bA_up, reset_on_bbp_bB_up, reset_on_bbp_bC_up)
+
+l1_show_settings = ShowSettings.new(l1_show_arrow0_bull, l1_show_arrow0_bear, l1_show_arrow1_bull, l1_show_arrow1_bear, l1_show_arrow2_bull, l1_show_arrow2_bear, l1_show_arrow2_encircled, l1_show_arrow3_bull, l1_show_arrow3_bear, l1_show_arrow4_bull, l1_show_arrow4_bear, l1_show_arrow5_bull, l1_show_arrow5_bear, l1_show_reversal_bull, l1_show_reversal_bear, l1_show_reversal_bbp_bull, l1_show_reversal_bbp_bear, l1_show_simul_breakout_bull, l1_show_simul_breakout_bear)
+l2_show_settings = ShowSettings.new(l2_show_arrow0_bull, l2_show_arrow0_bear, l2_show_arrow1_bull, l2_show_arrow1_bear, l2_show_arrow2_bull, l2_show_arrow2_bear, l2_show_arrow2_encircled, l2_show_arrow3_bull, l2_show_arrow3_bear, l2_show_arrow4_bull, l2_show_arrow4_bear, l2_show_arrow5_bull, l2_show_arrow5_bear, l2_show_reversal_bull, l2_show_reversal_bear, l2_show_reversal_bbp_bull, l2_show_reversal_bbp_bear, l2_show_simul_breakout_bull, l2_show_simul_breakout_bear)
+l3_show_settings = ShowSettings.new(l3_show_arrow0_bull, l3_show_arrow0_bear, l3_show_arrow1_bull, l3_show_arrow1_bear, l3_show_arrow2_bull, l3_show_arrow2_bear, l3_show_arrow2_encircled, l3_show_arrow3_bull, l3_show_arrow3_bear, l3_show_arrow4_bull, l3_show_arrow4_bear, l3_show_arrow5_bull, l3_show_arrow5_bear, l3_show_reversal_bull, l3_show_reversal_bear, l3_show_reversal_bbp_bull, l3_show_reversal_bbp_bear, l3_show_simul_breakout_bull, l3_show_simul_breakout_bear)
+
+reset_settings_2 = ResetSettings2.new(arrow_reset_tf_ops_2, arrow_reset_tf_signals_2, reset_on_cci100_up_2, reset_on_cci100_down_2, reset_on_cci0_up_2, reset_on_cci0_down_2, reset_on_cci_100_up_2, reset_on_cci_100_down_2, reset_on_bbp1_up_2, reset_on_bbp1_down_2, reset_on_bbp05_up_2, reset_on_bbp05_down_2, reset_on_bbp0_up_2, reset_on_bbp0_down_2, reset_on_cci_bA_up_2, reset_on_cci_bB_up_2, reset_on_cci_bC_up_2, reset_on_bbp_bA_up_2, reset_on_bbp_bB_up_2, reset_on_bbp_bC_up_2)
+
+// [l1_cci100_up, l1_cci100_down, l1_cci0_up, l1_cci0_down, l1_cci_100_up, l1_cci_100_down, l1_bbp1_up, l1_bbp1_down, l1_bbp05_up, l1_bbp05_down, l1_bbp0_up, l1_bbp0_down, l1_cci_bA, l1_cci_bB, l1_cci_bC, l1_bbp_bA, l1_bbp_bB, l1_bbp_bC, l1_arrow0_bull, l1_arrow0_bear, l1_arrow1_bull, l1_arrow1_bear, l1_arrow2_bull, l1_arrow2_bear, l1_arrow2_encircled_bull, l1_arrow2_encircled_bear, l1_arrow3_bull, l1_arrow3_bear, l1_arrow4_bull, l1_arrow4_bear, l1_arrow5_bull, l1_arrow5_bear, l1_reversal_bull, l1_reversal_bear, l1_reversal_bbp_bull, l1_reversal_bbp_bear, l1_simul_breakout_bull, l1_simul_breakout_bear, l1_ref_cci_bA, l1_ref_cci_bB, l1_ref_cci_bC, l1_ref_bbp_bA, l1_ref_bbp_bB, l1_ref_bbp_bC] = f_wrapper(compressed_l1, l1_show_settings, reset_settings_2)
+// [l2_cci100_up, l2_cci100_down, l2_cci0_up, l2_cci0_down, l2_cci_100_up, l2_cci_100_down, l2_bbp1_up, l2_bbp1_down, l2_bbp05_up, l2_bbp05_down, l2_bbp0_up, l2_bbp0_down, l2_cci_bA, l2_cci_bB, l2_cci_bC, l2_bbp_bA, l2_bbp_bB, l2_bbp_bC, l2_arrow0_bull, l2_arrow0_bear, l2_arrow1_bull, l2_arrow1_bear, l2_arrow2_bull, l2_arrow2_bear, l2_arrow2_encircled_bull, l2_arrow2_encircled_bear, l2_arrow3_bull, l2_arrow3_bear, l2_arrow4_bull, l2_arrow4_bear, l2_arrow5_bull, l2_arrow5_bear, l2_reversal_bull, l2_reversal_bear, l2_reversal_bbp_bull, l2_reversal_bbp_bear, l2_simul_breakout_bull, l2_simul_breakout_bear, l2_ref_cci_bA, l2_ref_cci_bB, l2_ref_cci_bC, l2_ref_bbp_bA, l2_ref_bbp_bB, l2_ref_bbp_bC] = f_wrapper(compressed_l2, l2_show_settings, reset_settings_2)
+// [l3_cci100_up, l3_cci100_down, l3_cci0_up, l3_cci0_down, l3_cci_100_up, l3_cci_100_down, l3_bbp1_up, l3_bbp1_down, l3_bbp05_up, l3_bbp05_down, l3_bbp0_up, l3_bbp0_down, l3_cci_bA, l3_cci_bB, l3_cci_bC, l3_bbp_bA, l3_bbp_bB, l3_bbp_bC, l3_arrow0_bull, l3_arrow0_bear, l3_arrow1_bull, l3_arrow1_bear, l3_arrow2_bull, l3_arrow2_bear, l3_arrow2_encircled_bull, l3_arrow2_encircled_bear, l3_arrow3_bull, l3_arrow3_bear, l3_arrow4_bull, l3_arrow4_bear, l3_arrow5_bull, l3_arrow5_bear, l3_reversal_bull, l3_reversal_bear, l3_reversal_bbp_bull, l3_reversal_bbp_bear, l3_simul_breakout_bull, l3_simul_breakout_bear, l3_ref_cci_bA, l3_ref_cci_bB, l3_ref_cci_bC, l3_ref_bbp_bA, l3_ref_bbp_bB, l3_ref_bbp_bC] = f_wrapper(compressed_l3, l3_show_settings, reset_settings_2)
+compressed_settings = Compressed.new("", false, op1, op2, op3, op4, op5, op6, op1_2, op2_2, op3_2, op4_2, op5_2, op6_2, arrow_reset_tf_ops, arrow_reset_tf_signals, reset_on_cci100_up, reset_on_cci100_down, reset_on_cci0_up, reset_on_cci0_down, reset_on_cci_100_up, reset_on_cci_100_down, reset_on_bbp1_up, reset_on_bbp1_down, reset_on_bbp05_up, reset_on_bbp05_down, reset_on_bbp0_up, reset_on_bbp0_down, reset_on_cci_bA_up, reset_on_cci_bB_up, reset_on_cci_bC_up, reset_on_bbp_bA_up, reset_on_bbp_bB_up, reset_on_bbp_bC_up)
+
+[l1_cci100_up, l1_cci100_down, l1_cci0_up, l1_cci0_down, l1_cci_100_up, l1_cci_100_down, l1_bbp1_up, l1_bbp1_down, l1_bbp05_up, l1_bbp05_down, l1_bbp0_up, l1_bbp0_down, l1_cci_bA, l1_cci_bB, l1_cci_bC, l1_bbp_bA, l1_bbp_bB, l1_bbp_bC, l1_arrow0_bull, l1_arrow0_bear, l1_arrow1_bull, l1_arrow1_bear, l1_arrow2_bull, l1_arrow2_bear, l1_arrow2_encircled_bull, l1_arrow2_encircled_bear, l1_arrow3_bull, l1_arrow3_bear, l1_arrow4_bull, l1_arrow4_bear, l1_arrow5_bull, l1_arrow5_bear, l1_reversal_bull, l1_reversal_bear, l1_reversal_bbp_bull, l1_reversal_bbp_bear, l1_simul_breakout_bull, l1_simul_breakout_bear] = f_security_call(Compressed.new(tfL1, enableL1, compressed_settings.op1, compressed_settings.op2, compressed_settings.op3, compressed_settings.op4, compressed_settings.op5, compressed_settings.op6, compressed_settings.op1_2, compressed_settings.op2_2, compressed_settings.op3_2, compressed_settings.op4_2, compressed_settings.op5_2, compressed_settings.op6_2, compressed_settings.arrow_reset_tf_ops, compressed_settings.arrow_reset_tf_signals, compressed_settings.reset_on_cci100_up, compressed_settings.reset_on_cci100_down, compressed_settings.reset_on_cci0_up, compressed_settings.reset_on_cci0_down, compressed_settings.reset_on_cci_100_up, compressed_settings.reset_on_cci_100_down, compressed_settings.reset_on_bbp1_up, compressed_settings.reset_on_bbp1_down, compressed_settings.reset_on_bbp05_up, compressed_settings.reset_on_bbp05_down, compressed_settings.reset_on_bbp0_up, compressed_settings.reset_on_bbp0_down, compressed_settings.reset_on_cci_bA_up, compressed_settings.reset_on_cci_bB_up, compressed_settings.reset_on_cci_bC_up, compressed_settings.reset_on_bbp_bA_up, compressed_settings.reset_on_bbp_bB_up, compressed_settings.reset_on_bbp_bC_up), l1_show_settings, reset_settings_2)
+[l2_cci100_up, l2_cci100_down, l2_cci0_up, l2_cci0_down, l2_cci_100_up, l2_cci_100_down, l2_bbp1_up, l2_bbp1_down, l2_bbp05_up, l2_bbp05_down, l2_bbp0_up, l2_bbp0_down, l2_cci_bA, l2_cci_bB, l2_cci_bC, l2_bbp_bA, l2_bbp_bB, l2_bbp_bC, l2_arrow0_bull, l2_arrow0_bear, l2_arrow1_bull, l2_arrow1_bear, l2_arrow2_bull, l2_arrow2_bear, l2_arrow2_encircled_bull, l2_arrow2_encircled_bear, l2_arrow3_bull, l2_arrow3_bear, l2_arrow4_bull, l2_arrow4_bear, l2_arrow5_bull, l2_arrow5_bear, l2_reversal_bull, l2_reversal_bear, l2_reversal_bbp_bull, l2_reversal_bbp_bear, l2_simul_breakout_bull, l2_simul_breakout_bear] = f_security_call(Compressed.new(tfL2, enableL2, compressed_settings.op1, compressed_settings.op2, compressed_settings.op3, compressed_settings.op4, compressed_settings.op5, compressed_settings.op6, compressed_settings.op1_2, compressed_settings.op2_2, compressed_settings.op3_2, compressed_settings.op4_2, compressed_settings.op5_2, compressed_settings.op6_2, compressed_settings.arrow_reset_tf_ops, compressed_settings.arrow_reset_tf_signals, compressed_settings.reset_on_cci100_up, compressed_settings.reset_on_cci100_down, compressed_settings.reset_on_cci0_up, compressed_settings.reset_on_cci0_down, compressed_settings.reset_on_cci_100_up, compressed_settings.reset_on_cci_100_down, compressed_settings.reset_on_bbp1_up, compressed_settings.reset_on_bbp1_down, compressed_settings.reset_on_bbp05_up, compressed_settings.reset_on_bbp05_down, compressed_settings.reset_on_bbp0_up, compressed_settings.reset_on_bbp0_down, compressed_settings.reset_on_cci_bA_up, compressed_settings.reset_on_cci_bB_up, compressed_settings.reset_on_cci_bC_up, compressed_settings.reset_on_bbp_bA_up, compressed_settings.reset_on_bbp_bB_up, compressed_settings.reset_on_bbp_bC_up), l2_show_settings, reset_settings_2)
+[l3_cci100_up, l3_cci100_down, l3_cci0_up, l3_cci0_down, l3_cci_100_up, l3_cci_100_down, l3_bbp1_up, l3_bbp1_down, l3_bbp05_up, l3_bbp05_down, l3_bbp0_up, l3_bbp0_down, l3_cci_bA, l3_cci_bB, l3_cci_bC, l3_bbp_bA, l3_bbp_bB, l3_bbp_bC, l3_arrow0_bull, l3_arrow0_bear, l3_arrow1_bull, l3_arrow1_bear, l3_arrow2_bull, l3_arrow2_bear, l3_arrow2_encircled_bull, l3_arrow2_encircled_bear, l3_arrow3_bull, l3_arrow3_bear, l3_arrow4_bull, l3_arrow4_bear, l3_arrow5_bull, l3_arrow5_bear, l3_reversal_bull, l3_reversal_bear, l3_reversal_bbp_bull, l3_reversal_bbp_bear, l3_simul_breakout_bull, l3_simul_breakout_bear] = f_security_call(Compressed.new(tfL3, enableL3, compressed_settings.op1, compressed_settings.op2, compressed_settings.op3, compressed_settings.op4, compressed_settings.op5, compressed_settings.op6, compressed_settings.op1_2, compressed_settings.op2_2, compressed_settings.op3_2, compressed_settings.op4_2, compressed_settings.op5_2, compressed_settings.op6_2, compressed_settings.arrow_reset_tf_ops, compressed_settings.arrow_reset_tf_signals, compressed_settings.reset_on_cci100_up, compressed_settings.reset_on_cci100_down, compressed_settings.reset_on_cci0_up, compressed_settings.reset_on_cci0_down, compressed_settings.reset_on_cci_100_up, compressed_settings.reset_on_cci_100_down, compressed_settings.reset_on_bbp1_up, compressed_settings.reset_on_bbp1_down, compressed_settings.reset_on_bbp05_up, compressed_settings.reset_on_bbp05_down, compressed_settings.reset_on_bbp0_up, compressed_settings.reset_on_bbp0_down, compressed_settings.reset_on_cci_bA_up, compressed_settings.reset_on_cci_bB_up, compressed_settings.reset_on_cci_bC_up, compressed_settings.reset_on_bbp_bA_up, compressed_settings.reset_on_bbp_bB_up, compressed_settings.reset_on_bbp_bC_up), l3_show_settings, reset_settings_2)
+
+[maxar, minar, _, _, _, _, _, _] = f_python_indicators(src, high, low, close, round_val_input, delta_input)
+
+// —————————————————————————————————————————————————————————————————————————————
+// Object Instantiation
+// —————————————————————————————————————————————————————————————————————————————
+
+l1_settings = LayerSettings.new(enable=enableL1, tf=tfL1, layer_name="L1", bull_text_color=l1BullTextColor, bull_shape_color=l1BullShapeColor, bear_text_color=l1BearTextColor, bear_shape_color=l1BearShapeColor, cci100=SignalSettings.new(l1_show_cci100_bull, l1_show_cci100_bear, l1_cci100_up, l1_cci100_down, l1_msg_cci100_bull, l1_msg_cci100_bear, l1_trade_type_cci100_bull, l1_trade_type_cci100_bear), cci0=SignalSettings.new(l1_show_cci0_bull, l1_show_cci0_bear, l1_cci0_up, l1_cci0_down, l1_msg_cci0_bull, l1_msg_cci0_bear, l1_trade_type_cci0_bull, l1_trade_type_cci0_bear), cci_100=SignalSettings.new(l1_show_cci_100_bull, l1_show_cci_100_bear, l1_cci_100_up, l1_cci_100_down, l1_msg_cci_100_bull, l1_msg_cci_100_bear, l1_trade_type_cci_100_bull, l1_trade_type_cci_100_bear), bbp1=SignalSettings.new(l1_show_bbp1_bull, l1_show_bbp1_bear, l1_bbp1_up, l1_bbp1_down, l1_msg_bbp1_bull, l1_msg_bbp1_bear, l1_trade_type_bbp1_bull, l1_trade_type_bbp1_bear), bbp05=SignalSettings.new(l1_show_bbp05_bull, l1_show_bbp05_bear, l1_bbp05_up, l1_bbp05_down, l1_msg_bbp05_bull, l1_msg_bbp05_bear, l1_trade_type_bbp05_bull, l1_trade_type_bbp05_bear), bbp0=SignalSettings.new(l1_show_bbp0_bull, l1_show_bbp0_bear, l1_bbp0_up, l1_bbp0_down, l1_msg_bbp0_bull, l1_msg_bbp0_bear, l1_trade_type_bbp0_bull, l1_trade_type_bbp0_bear), cci_bA=SignalSettings.new(l1_show_cci_bA_bull, l1_show_cci_bA_bear, l1_cci_bA, l1_cci_bA, l1_msg_cci_bA_bull, l1_msg_cci_bA_bear, l1_trade_type_cci_bA_bull, l1_trade_type_cci_bA_bear), cci_bB=SignalSettings.new(l1_show_cci_bB_bull, l1_show_cci_bB_bear, l1_cci_bB, l1_cci_bB, l1_msg_cci_bB_bull, l1_msg_cci_bB_bear, l1_trade_type_cci_bB_bull, l1_trade_type_cci_bB_bear), cci_bC=SignalSettings.new(l1_show_cci_bC_bull, l1_show_cci_bC_bear, l1_cci_bC, l1_cci_bC, l1_msg_cci_bC_bull, l1_msg_cci_bC_bear, l1_trade_type_cci_bC_bull, l1_trade_type_cci_bC_bear), bbp_bA=SignalSettings.new(l1_show_bbp_bA_bull, l1_show_bbp_bA_bear, l1_bbp_bA, l1_bbp_bA, l1_msg_bbp_bA_bull, l1_msg_bbp_bA_bear, l1_trade_type_bbp_bA_bull, l1_trade_type_bbp_bA_bear), bbp_bB=SignalSettings.new(l1_show_bbp_bB_bull, l1_show_bbp_bB_bear, l1_bbp_bB, l1_bbp_bB, l1_msg_bbp_bB_bull, l1_msg_bbp_bB_bear, l1_trade_type_bbp_bB_bull, l1_trade_type_bbp_bB_bear), bbp_bC=SignalSettings.new(l1_show_bbp_bC_bull, l1_show_bbp_bC_bear, l1_bbp_bC, l1_bbp_bC, l1_msg_bbp_bC_bull, l1_msg_bbp_bC_bear, l1_trade_type_bbp_bC_bull, l1_trade_type_bbp_bC_bear), arrow0=SignalSettings.new(l1_show_arrow0_bull, l1_show_arrow0_bear, l1_arrow0_bull, l1_arrow0_bear, l1_msg_arrow0_bull, l1_msg_arrow0_bear, l1_trade_type_arrow0_bull, l1_trade_type_arrow0_bear), arrow1=SignalSettings.new(l1_show_arrow1_bull, l1_show_arrow1_bear, l1_arrow1_bull, l1_arrow1_bear, l1_msg_arrow1_bull, l1_msg_arrow1_bear, l1_trade_type_arrow1_bull, l1_trade_type_arrow1_bear), arrow2=SignalSettings.new(l1_show_arrow2_bull, l1_show_arrow2_bear, l1_arrow2_bull, l1_arrow2_bear, l1_msg_arrow2_bull, l1_msg_arrow2_bear, l1_trade_type_arrow2_bull, l1_trade_type_arrow2_bear), arrow2e=SignalSettings.new(l1_show_arrow2_encircled, l1_show_arrow2_encircled, l1_arrow2_encircled_bull, l1_arrow2_encircled_bear, l1_msg_arrow2_encircled_bull, l1_msg_arrow2_encircled_bear, l1_trade_type_arrow2_encircled_bull, l1_trade_type_arrow2_encircled_bear), arrow3=SignalSettings.new(l1_show_arrow3_bull, l1_show_arrow3_bear, l1_arrow3_bull, l1_arrow3_bear, l1_msg_arrow3_bull, l1_msg_arrow3_bear, l1_trade_type_arrow3_bull, l1_trade_type_arrow3_bear), arrow4=SignalSettings.new(l1_show_arrow4_bull, l1_show_arrow4_bear, l1_arrow4_bull, l1_arrow4_bear, l1_msg_arrow4_bull, l1_msg_arrow4_bear, l1_trade_type_arrow4_bull, l1_trade_type_arrow4_bear), arrow5=SignalSettings.new(l1_show_arrow5_bull, l1_show_arrow5_bear, l1_arrow5_bull, l1_arrow5_bear, l1_msg_arrow5_bull, l1_msg_arrow5_bear, l1_trade_type_arrow5_bull, l1_trade_type_arrow5_bear), reversal_cci=SignalSettings.new(l1_show_reversal_bull, l1_show_reversal_bear, l1_reversal_bull, l1_reversal_bear, l1_msg_reversal_bull, l1_msg_reversal_bear, l1_trade_type_reversal_bull, l1_trade_type_reversal_bear), reversal_bbp=SignalSettings.new(l1_show_reversal_bbp_bull, l1_show_reversal_bbp_bear, l1_reversal_bbp_bull, l1_reversal_bbp_bear, l1_msg_reversal_bbp_bull, l1_msg_reversal_bbp_bear, l1_trade_type_reversal_bbp_bull, l1_trade_type_reversal_bbp_bear), simul_breakout=SignalSettings.new(l1_show_simul_breakout_bull, l1_show_simul_breakout_bear, l1_simul_breakout_bull, l1_simul_breakout_bear, l1_msg_simul_breakout_bull, l1_msg_simul_breakout_bear, l1_trade_type_simul_breakout_bull, l1_trade_type_simul_breakout_bear))
+
+l2_settings = LayerSettings.new(enable=enableL2, tf=tfL2, layer_name="L2", bull_text_color=l2BullTextColor, bull_shape_color=l2BullShapeColor, bear_text_color=l2BearTextColor, bear_shape_color=l2BearShapeColor, cci100=SignalSettings.new(l2_show_cci100_bull, l2_show_cci100_bear, l2_cci100_up, l2_cci100_down, l2_msg_cci100_bull, l2_msg_cci100_bear, l2_trade_type_cci100_bull, l2_trade_type_cci100_bear), cci0=SignalSettings.new(l2_show_cci0_bull, l2_show_cci0_bear, l2_cci0_up, l2_cci0_down, l2_msg_cci0_bull, l2_msg_cci0_bear, l2_trade_type_cci0_bull, l2_trade_type_cci0_bear), cci_100=SignalSettings.new(l2_show_cci_100_bull, l2_show_cci_100_bear, l2_cci_100_up, l2_cci_100_down, l2_msg_cci_100_bull, l2_msg_cci_100_bear, l2_trade_type_cci_100_bull, l2_trade_type_cci_100_bear), bbp1=SignalSettings.new(l2_show_bbp1_bull, l2_show_bbp1_bear, l2_bbp1_up, l2_bbp1_down, l2_msg_bbp1_bull, l2_msg_bbp1_bear, l2_trade_type_bbp1_bull, l2_trade_type_bbp1_bear), bbp05=SignalSettings.new(l2_show_bbp05_bull, l2_show_bbp05_bear, l2_bbp05_up, l2_bbp05_down, l2_msg_bbp05_bull, l2_msg_bbp05_bear, l2_trade_type_bbp05_bull, l2_trade_type_bbp05_bear), bbp0=SignalSettings.new(l2_show_bbp0_bull, l2_show_bbp0_bear, l2_bbp0_up, l2_bbp0_down, l2_msg_bbp0_bull, l2_msg_bbp0_bear, l2_trade_type_bbp0_bull, l2_trade_type_bbp0_bear), cci_bA=SignalSettings.new(l2_show_cci_bA_bull, l2_show_cci_bA_bear, l2_cci_bA, l2_cci_bA, l2_msg_cci_bA_bull, l2_msg_cci_bA_bear, l2_trade_type_cci_bA_bull, l2_trade_type_cci_bA_bear), cci_bB=SignalSettings.new(l2_show_cci_bB_bull, l2_show_cci_bB_bear, l2_cci_bB, l2_cci_bB, l2_msg_cci_bB_bull, l2_msg_cci_bB_bear, l2_trade_type_cci_bB_bull, l2_trade_type_cci_bB_bear), cci_bC=SignalSettings.new(l2_show_cci_bC_bull, l2_show_cci_bC_bear, l2_cci_bC, l2_cci_bC, l2_msg_cci_bC_bull, l2_msg_cci_bC_bear, l2_trade_type_cci_bC_bull, l2_trade_type_cci_bC_bear), bbp_bA=SignalSettings.new(l2_show_bbp_bA_bull, l2_show_bbp_bA_bear, l2_bbp_bA, l2_bbp_bA, l2_msg_bbp_bA_bull, l2_msg_bbp_bA_bear, l2_trade_type_bbp_bA_bull, l2_trade_type_bbp_bA_bear), bbp_bB=SignalSettings.new(l2_show_bbp_bB_bull, l2_show_bbp_bB_bear, l2_bbp_bB, l2_bbp_bB, l2_msg_bbp_bB_bull, l2_msg_bbp_bB_bear, l2_trade_type_bbp_bB_bull, l2_trade_type_bbp_bB_bear), bbp_bC=SignalSettings.new(l2_show_bbp_bC_bull, l2_show_bbp_bC_bear, l2_bbp_bC, l2_bbp_bC, l2_msg_bbp_bC_bull, l2_msg_bbp_bC_bear, l2_trade_type_bbp_bC_bull, l2_trade_type_bbp_bC_bear), arrow0=SignalSettings.new(l2_show_arrow0_bull, l2_show_arrow0_bear, l2_arrow0_bull, l2_arrow0_bear, l2_msg_arrow0_bull, l2_msg_arrow0_bear, l2_trade_type_arrow0_bull, l2_trade_type_arrow0_bear), arrow1=SignalSettings.new(l2_show_arrow1_bull, l2_show_arrow1_bear, l2_arrow1_bull, l2_arrow1_bear, l2_msg_arrow1_bull, l2_msg_arrow1_bear, l2_trade_type_arrow1_bull, l2_trade_type_arrow1_bear), arrow2=SignalSettings.new(l2_show_arrow2_bull, l2_show_arrow2_bear, l2_arrow2_bull, l2_arrow2_bear, l2_msg_arrow2_bull, l2_msg_arrow2_bear, l2_trade_type_arrow2_bull, l2_trade_type_arrow2_bear), arrow2e=SignalSettings.new(l2_show_arrow2_encircled, l2_show_arrow2_encircled, l2_arrow2_encircled_bull, l2_arrow2_encircled_bear, l2_msg_arrow2_encircled_bull, l2_msg_arrow2_encircled_bear, l2_trade_type_arrow2_encircled_bull, l2_trade_type_arrow2_encircled_bear), arrow3=SignalSettings.new(l2_show_arrow3_bull, l2_show_arrow3_bear, l2_arrow3_bull, l2_arrow3_bear, l2_msg_arrow3_bull, l2_msg_arrow3_bear, l2_trade_type_arrow3_bull, l2_trade_type_arrow3_bear), arrow4=SignalSettings.new(l2_show_arrow4_bull, l2_show_arrow4_bear, l2_arrow4_bull, l2_arrow4_bear, l2_msg_arrow4_bull, l2_msg_arrow4_bear, l2_trade_type_arrow4_bull, l2_trade_type_arrow4_bear), arrow5=SignalSettings.new(l2_show_arrow5_bull, l2_show_arrow5_bear, l2_arrow5_bull, l2_arrow5_bear, l2_msg_arrow5_bull, l2_msg_arrow5_bear, l2_trade_type_arrow5_bull, l2_trade_type_arrow5_bear), reversal_cci=SignalSettings.new(l2_show_reversal_bull, l2_show_reversal_bear, l2_reversal_bull, l2_reversal_bear, l2_msg_reversal_bull, l2_msg_reversal_bear, l2_trade_type_reversal_bull, l2_trade_type_reversal_bear), reversal_bbp=SignalSettings.new(l2_show_reversal_bbp_bull, l2_show_reversal_bbp_bear, l2_reversal_bbp_bull, l2_reversal_bbp_bear, l2_msg_reversal_bbp_bull, l2_msg_reversal_bbp_bear, l2_trade_type_reversal_bbp_bull, l2_trade_type_reversal_bbp_bear), simul_breakout=SignalSettings.new(l2_show_simul_breakout_bull, l2_show_simul_breakout_bear, l2_simul_breakout_bull, l2_simul_breakout_bear, l2_msg_simul_breakout_bull, l2_msg_simul_breakout_bear, l2_trade_type_simul_breakout_bull, l2_trade_type_simul_breakout_bear))
+
+l3_settings = LayerSettings.new(enable=enableL3, tf=tfL3, layer_name="L3", bull_text_color=l3BullTextColor, bull_shape_color=l3BullShapeColor, bear_text_color=l3BearTextColor, bear_shape_color=l3BearShapeColor, cci100=SignalSettings.new(l3_show_cci100_bull, l3_show_cci100_bear, l3_cci100_up, l3_cci100_down, l3_msg_cci100_bull, l3_msg_cci100_bear, l3_trade_type_cci100_bull, l3_trade_type_cci100_bear), cci0=SignalSettings.new(l3_show_cci0_bull, l3_show_cci0_bear, l3_cci0_up, l3_cci0_down, l3_msg_cci0_bull, l3_msg_cci0_bear, l3_trade_type_cci0_bull, l3_trade_type_cci0_bear), cci_100=SignalSettings.new(l3_show_cci_100_bull, l3_show_cci_100_bear, l3_cci_100_up, l3_cci_100_down, l3_msg_cci_100_bull, l3_msg_cci_100_bear, l3_trade_type_cci_100_bull, l3_trade_type_cci_100_bear), bbp1=SignalSettings.new(l3_show_bbp1_bull, l3_show_bbp1_bear, l3_bbp1_up, l3_bbp1_down, l3_msg_bbp1_bull, l3_msg_bbp1_bear, l3_trade_type_bbp1_bull, l3_trade_type_bbp1_bear), bbp05=SignalSettings.new(l3_show_bbp05_bull, l3_show_bbp05_bear, l3_bbp05_up, l3_bbp05_down, l3_msg_bbp05_bull, l3_msg_bbp05_bear, l3_trade_type_bbp05_bull, l3_trade_type_bbp05_bear), bbp0=SignalSettings.new(l3_show_bbp0_bull, l3_show_bbp0_bear, l3_bbp0_up, l3_bbp0_down, l3_msg_bbp0_bull, l3_msg_bbp0_bear, l3_trade_type_bbp0_bull, l3_trade_type_bbp0_bear), cci_bA=SignalSettings.new(l3_show_cci_bA_bull, l3_show_cci_bA_bear, l3_cci_bA, l3_cci_bA, l3_msg_cci_bA_bull, l3_msg_cci_bA_bear, l3_trade_type_cci_bA_bull, l3_trade_type_cci_bA_bear), cci_bB=SignalSettings.new(l3_show_cci_bB_bull, l3_show_cci_bB_bear, l3_cci_bB, l3_cci_bB, l3_msg_cci_bB_bull, l3_msg_cci_bB_bear, l3_trade_type_cci_bB_bull, l3_trade_type_cci_bB_bear), cci_bC=SignalSettings.new(l3_show_cci_bC_bull, l3_show_cci_bC_bear, l3_cci_bC, l3_cci_bC, l3_msg_cci_bC_bull, l3_msg_cci_bC_bear, l3_trade_type_cci_bC_bull, l3_trade_type_cci_bC_bear), bbp_bA=SignalSettings.new(l3_show_bbp_bA_bull, l3_show_bbp_bA_bear, l3_bbp_bA, l3_bbp_bA, l3_msg_bbp_bA_bull, l3_msg_bbp_bA_bear, l3_trade_type_bbp_bA_bull, l3_trade_type_bbp_bA_bear), bbp_bB=SignalSettings.new(l3_show_bbp_bB_bull, l3_show_bbp_bB_bear, l3_bbp_bB, l3_bbp_bB, l3_msg_bbp_bB_bull, l3_msg_bbp_bB_bear, l3_trade_type_bbp_bB_bull, l3_trade_type_bbp_bB_bear), bbp_bC=SignalSettings.new(l3_show_bbp_bC_bull, l3_show_bbp_bC_bear, l3_bbp_bC, l3_bbp_bC, l3_msg_bbp_bC_bull, l3_msg_bbp_bC_bear, l3_trade_type_bbp_bC_bull, l3_trade_type_bbp_bC_bear), arrow0=SignalSettings.new(l3_show_arrow0_bull, l3_show_arrow0_bear, l3_arrow0_bull, l3_arrow0_bear, l3_msg_arrow0_bull, l3_msg_arrow0_bear, l3_trade_type_arrow0_bull, l3_trade_type_arrow0_bear), arrow1=SignalSettings.new(l3_show_arrow1_bull, l3_show_arrow1_bear, l3_arrow1_bull, l3_arrow1_bear, l3_msg_arrow1_bull, l3_msg_arrow1_bear, l3_trade_type_arrow1_bull, l3_trade_type_arrow1_bear), arrow2=SignalSettings.new(l3_show_arrow2_bull, l3_show_arrow2_bear, l3_arrow2_bull, l3_arrow2_bear, l3_msg_arrow2_bull, l3_msg_arrow2_bear, l3_trade_type_arrow2_bull, l3_trade_type_arrow2_bear), arrow2e=SignalSettings.new(l3_show_arrow2_encircled, l3_show_arrow2_encircled, l3_arrow2_encircled_bull, l3_arrow2_encircled_bear, l3_msg_arrow2_encircled_bull, l3_msg_arrow2_encircled_bear, l3_trade_type_arrow2_encircled_bull, l3_trade_type_arrow2_encircled_bear), arrow3=SignalSettings.new(l3_show_arrow3_bull, l3_show_arrow3_bear, l3_arrow3_bull, l3_arrow3_bear, l3_msg_arrow3_bull, l3_msg_arrow3_bear, l3_trade_type_arrow3_bull, l3_trade_type_arrow3_bear), arrow4=SignalSettings.new(l3_show_arrow4_bull, l3_show_arrow4_bear, l3_arrow4_bull, l3_arrow4_bear, l3_msg_arrow4_bull, l3_msg_arrow4_bear, l3_trade_type_arrow4_bull, l3_trade_type_arrow4_bear), arrow5=SignalSettings.new(l3_show_arrow5_bull, l3_show_arrow5_bear, l3_arrow5_bull, l3_arrow5_bear, l3_msg_arrow5_bull, l3_msg_arrow5_bear, l3_trade_type_arrow5_bull, l3_trade_type_arrow5_bear), reversal_cci=SignalSettings.new(l3_show_reversal_bull, l3_show_reversal_bear, l3_reversal_bull, l3_reversal_bear, l3_msg_reversal_bull, l3_msg_reversal_bear, l3_trade_type_reversal_bull, l3_trade_type_reversal_bear), reversal_bbp=SignalSettings.new(l3_show_reversal_bbp_bull, l3_show_reversal_bbp_bear, l3_reversal_bbp_bull, l3_reversal_bbp_bear, l3_msg_reversal_bbp_bull, l3_msg_reversal_bbp_bear, l3_trade_type_reversal_bbp_bull, l3_trade_type_reversal_bbp_bear), simul_breakout=SignalSettings.new(l3_show_simul_breakout_bull, l3_show_simul_breakout_bear, l3_simul_breakout_bull, l3_simul_breakout_bear, l3_msg_simul_breakout_bull, l3_msg_simul_breakout_bear, l3_trade_type_simul_breakout_bull, l3_trade_type_simul_breakout_bear))
+
+// —————————————————————————————————————————————————————————————————————————————
+// Plotting
+// —————————————————————————————————————————————————————————————————————————————
+
+// plot(oh_val, "OH", color=color.new(color.blue, 0), linewidth=2)
+// plot(ol_val, "OL", color=color.new(color.red, 0), linewidth=2)
+plot(maxar, "MAXAr", color=color.new(color.blue, 100), linewidth=1)
+plot(minar, "MINAr", color=color.new(color.red, 100), linewidth=1)
+
+f_map_trade_type(trade_type) =>
+    if str.length(trade_type) == 0
+        ""
+    else
+        num_str = str.substring(trade_type, 0, str.length(trade_type) - 1)
+        type_char = str.substring(trade_type, str.length(trade_type) - 1, str.length(trade_type))
+        trade_num = str.tonumber(num_str)
+
+        base_action = type_char == 'B' ? "Buy" : "Sell"
+        modifier = ""
+
+        if trade_num > 1
+            if trade_num % 2 == 0 // Even: Exit
+                num_reverses = (trade_num - 2) / 2
+                // Replace loop with str.repeat
+                modifier += str.repeat("Reverse ", int(num_reverses))
+                modifier += "Exit"
+            else // Odd: Reverse
+                num_reverses = (trade_num - 1) / 2
+                // Replace loop with str.repeat
+                modifier += str.repeat("Reverse ", int(num_reverses))
+
+        str.trim(base_action + " " + modifier)
+
+var int[] _sig_stack = array.new_int(3, 0)
+
+// helper: produce human-friendly timeframe text (append "m" for numeric TFs)
+f_human_tf(tf) =>
+    // string t = tf == "" ? timeframe.period : tf
+    // float n = str.tonumber(t)
+    // not na(n) ? t + "m" : t
+	tf
+
+var last_trade_type_arr = array.new_string(1, "")  // index 0 = last trade type
+f_is_valid_trade_type(trade_type) =>
+	if trade_type == ""
+		false
+	else
+		string last_trade_type = array.get(last_trade_type_arr, 0)
+		if last_trade_type == ""
+			array.set(last_trade_type_arr, 0, trade_type)
+		last_trade_type := array.get(last_trade_type_arr, 0)
+		if trade_type != ""
+			last_num_str = str.substring(last_trade_type, 0, str.length(last_trade_type) - 1)
+			last_type_str = str.substring(last_trade_type, str.length(last_trade_type) - 1, str.length(last_trade_type))
+			last_trade_num = str.tonumber(last_num_str)
+
+			num_str = str.substring(trade_type, 0, str.length(trade_type) - 1)
+			type_str = str.substring(trade_type, str.length(trade_type) - 1, str.length(trade_type))
+			trade_num = str.tonumber(num_str)
+			bool show = false
+			if type_str == last_type_str or (last_trade_num == 1 and type_str == last_type_str) or last_trade_num % 2 == 0
+				if trade_num == last_trade_num
+					show := false
+				else if trade_num == 1 and last_trade_num % 2 == 0
+					array.set(last_trade_type_arr, 0, trade_type)
+					show := true
+				else if trade_num != last_trade_num and trade_num % 2 == 1 and trade_num == last_trade_num + 2
+					array.set(last_trade_type_arr, 0, trade_type)
+					show := true
+				else if trade_num != last_trade_num and trade_num % 2 == 0 and trade_num == last_trade_num + 1
+					array.set(last_trade_type_arr, 0, trade_type)
+					show := true
+				// log.info("trade_type: " + trade_type + " " + last_trade_type + " " + str.tostring(show) + str.tostring(trade_num) + " " + str.tostring(last_trade_num))
+			else if type_str == "C" and last_trade_num == trade_num
+				show := true
+			show
+		else
+			false
+
+f_get_ref_maxar() =>
+	if bbp_A_event == 1
+		ref_bbp_A[1]
+	else if bbp_B_event == 1
+		ref_bbp_B[1]
+	else if bbp_C_event == 1
+		ref_bbp_C[1]
+	else if cci_A_event == 1
+		ref_cci_A[1]
+	else if cci_B_event == 1
+		ref_cci_B[1]
+	else if cci_C_event == 1
+		ref_cci_C[1]
+	else
+		maxar[1]
+
+f_get_ref_minar() =>
+	if bbp_A_event == -1
+		ref_bbp_A[1]
+	else if bbp_B_event == -1
+		ref_bbp_B[1]
+	else if bbp_C_event == -1
+		ref_bbp_C[1]
+	else if cci_A_event == -1
+		ref_cci_A[1]
+	else if cci_B_event == -1
+		ref_cci_B[1]
+	else if cci_C_event == -1
+		ref_cci_C[1]
+	else
+		minar[1]
+
+
+// updated plotting helper that uses the global array for stacking (mutable inside function)
+f_plotSignal(enable, signal_settings, signal_value, text_, tf, bullColor, bearColor, bullTextColor, bearTextColor, size, layer) =>
+    // HTF Change Detection: Only proceed if it's the first bar of a new HTF period.
+    is_new_htf_bar = timeframe.isintraday and (tf != timeframe.period) and (time(tf) != time(tf)[1])
+    can_plot = timeframe.isdaily or (tf == timeframe.period) or is_new_htf_bar
+	can_lookahead = tf == timeframe.period
+	// Request the close of the signal's timeframe.
+	// Use `barmerge.lookahead_on` to get the current (non-repainting) close if the signal TF is higher than the chart TF.
+	float signal_tf_close = 0
+
+	signal_tf_close := request.security(syminfo.tickerid, tf, close, lookahead = barmerge.lookahead_on)
+
+	ma = f_get_ref_maxar()
+	mi = f_get_ref_minar()
+
+    if enable and can_plot
+        // reset stacking when moving to a new bar
+        if array.get(_sig_stack, 0) != bar_index
+            array.set(_sig_stack, 0, bar_index)
+            array.set(_sig_stack, 1, 0)
+            array.set(_sig_stack, 2, 0)
+
+		// vertical spacing step (ATR(14) with safe minimum)
+		float step = math.max(ta.atr(4), syminfo.mintick * 50)
+
+		if signal_value == 1 and signal_settings.show_bull
+			int bcount = array.get(_sig_stack, 1)
+			float y = high + (bcount * step) + ta.atr(20)
+			string human_tf = f_human_tf(tf)
+			string label_text = ""
+			string trade_type_prefix = signal_settings.trade_type_bull == "" ? "" : signal_settings.trade_type_bull + ": "
+			log.info("TradeType: " + signal_settings.trade_type_bull)
+
+			if not f_is_valid_trade_type(signal_settings.trade_type_bull)
+				trade_type_prefix := ""
+			if text_ == "."
+				label_text := text_ + "\n" + trade_type_prefix
+			else
+				label_text := text_ + " " + human_tf  + "\n" + trade_type_prefix
+			string bull_alert_message = (signal_settings.trade_type_bull == "" ? "" : trade_type_prefix + ": ") + "\n" + text_
+			string dynamic_part = "\n" + f_map_trade_type(signal_settings.trade_type_bull)
+			if alert_include_ticker
+				dynamic_part += "\n" + syminfo.tickerid
+			if alert_include_timeframe
+				dynamic_part += "\n on " + human_tf
+			dynamic_part += "\n at " + str.format_time(time, "yyyy-MM-dd HH:mm", "GMT+05:30")
+			if alert_include_open
+				dynamic_part += "\nO:" + str.tostring(open)
+			if alert_include_high
+				dynamic_part += "\nH:" + str.tostring(high)
+			if alert_include_low
+				dynamic_part += "\nL:" + str.tostring(low)
+
+
+
+
+			string trade_type = signal_settings.trade_type_bull
+			if str.length(trade_type) > 0
+				string num_str = str.substring(trade_type, 0, str.length(trade_type) - 1)
+				float trade_num = str.tonumber(num_str)
+				if not na(trade_num)
+					if trade_num == 1
+						dynamic_part += "\n" + str.tostring(ma)
+					else if trade_num % 2 == 0 or alert_include_close
+						dynamic_part += "\nC:" + str.tostring(signal_tf_close)
+
+			if alert_include_maxar
+				dynamic_part += "\n" + str.tostring(ma)
+			if alert_include_minar
+				dynamic_part += "\n" + str.tostring(mi)
+
+			bull_alert_message += dynamic_part + (signal_settings.bull_msg == "" ? "" : "\n" + signal_settings.bull_msg)
+			log.info(bull_alert_message)
+			label.new(bar_index, y, label_text, xloc = xloc.bar_index, yloc = yloc.price, color = na, textcolor = bullColor, style = label.style_label_up, size = size)
+			array.set(_sig_stack, 1, bcount + 1)
+			alert(bull_alert_message, freq = alert.freq_once_per_bar)
+
+		if signal_value == -1 and signal_settings.show_bear
+			int scount = array.get(_sig_stack, 2)
+			float y2 = low - (scount * step) - ta.atr(20)
+			string human_tf = f_human_tf(tf)
+			string label_text = ""
+			string trade_type_prefix = signal_settings.trade_type_bear == "" ? "" : signal_settings.trade_type_bear + ": "
+			log.info("TradeType: " + signal_settings.trade_type_bear)
+
+			if not f_is_valid_trade_type(signal_settings.trade_type_bear)
+				trade_type_prefix := ""
+			if text_ == "."
+				label_text := text_ + "\n" + trade_type_prefix
+			else
+				label_text := text_ + " " + human_tf + "\n" + trade_type_prefix
+			string bear_alert_message = (signal_settings.trade_type_bear == "" ? "" : trade_type_prefix + ": ") + "\n" + text_
+			string dynamic_part = "\n" + f_map_trade_type(signal_settings.trade_type_bear)
+			if alert_include_ticker
+				dynamic_part += "\n" + syminfo.tickerid
+			if alert_include_timeframe
+				dynamic_part += "\non " + human_tf
+			dynamic_part += "\n at " + str.format_time(time, "yyyy-MM-dd HH:mm", "GMT+05:30")
+			if alert_include_open
+				dynamic_part += "\nO:" + str.tostring(open)
+			if alert_include_high
+				dynamic_part += "\nH:" + str.tostring(high)
+			if alert_include_low
+				dynamic_part += "\nL:" + str.tostring(low)
+
+			string trade_type = signal_settings.trade_type_bear
+			if str.length(trade_type) > 0
+				string num_str = str.substring(trade_type, 0, str.length(trade_type) - 1)
+				float trade_num = str.tonumber(num_str)
+				if not na(trade_num)
+					if trade_num == 1
+						dynamic_part += "\n" + str.tostring(mi)
+					else if trade_num % 2 == 0 or alert_include_close
+						dynamic_part += "\nC:" + str.tostring(signal_tf_close)
+
+			if alert_include_maxar
+				dynamic_part += "\n" + str.tostring(ma)
+			if alert_include_minar
+				dynamic_part += "\n" + str.tostring(mi)
+
+			bear_alert_message += dynamic_part + (signal_settings.bear_msg == "" ? "" : " | " + signal_settings.bear_msg)
+			log.info(bear_alert_message)
+			label.new(bar_index, y2, label_text, xloc = xloc.bar_index, yloc = yloc.price, color = na, textcolor = bearColor, style = label.style_label_down, size = size)
+			array.set(_sig_stack, 2, scount + 1)
+			alert(bear_alert_message, freq = alert.freq_once_per_bar)
+
+f_plotLayerSignals(layer_settings) =>
+	string final_tf = layer_settings.tf == "" ? timeframe.period : layer_settings.tf
+	f_plotSignal(layer_settings.enable, layer_settings.cci100, layer_settings.cci100.bull_signal, "C-A+", final_tf, layer_settings.bull_shape_color, layer_settings.bear_shape_color, layer_settings.bull_text_color, layer_settings.bear_text_color, size.small, layer_settings.layer_name)
+	f_plotSignal(layer_settings.enable, layer_settings.cci100, layer_settings.cci100.bear_signal, "C-A-", final_tf, layer_settings.bull_shape_color, layer_settings.bear_shape_color, layer_settings.bull_text_color, layer_settings.bear_text_color, size.small, layer_settings.layer_name)
+	f_plotSignal(layer_settings.enable, layer_settings.cci0, layer_settings.cci0.bull_signal, "C-B+", final_tf, layer_settings.bull_shape_color, layer_settings.bear_shape_color, layer_settings.bull_text_color, layer_settings.bear_text_color, size.small, layer_settings.layer_name)
+	f_plotSignal(layer_settings.enable, layer_settings.cci0, layer_settings.cci0.bear_signal, "C-B-", final_tf, layer_settings.bull_shape_color, layer_settings.bear_shape_color, layer_settings.bull_text_color, layer_settings.bear_text_color, size.small, layer_settings.layer_name)
+	f_plotSignal(layer_settings.enable, layer_settings.cci_100, layer_settings.cci_100.bull_signal, "C-C+", final_tf, layer_settings.bull_shape_color, layer_settings.bear_shape_color, layer_settings.bull_text_color, layer_settings.bear_text_color, size.small, layer_settings.layer_name)
+	f_plotSignal(layer_settings.enable, layer_settings.cci_100, layer_settings.cci_100.bear_signal, "C-C-", final_tf, layer_settings.bull_shape_color, layer_settings.bear_shape_color, layer_settings.bull_text_color, layer_settings.bear_text_color, size.small, layer_settings.layer_name)
+	f_plotSignal(layer_settings.enable, layer_settings.bbp1, layer_settings.bbp1.bull_signal, "B-A+", final_tf, layer_settings.bull_shape_color, layer_settings.bear_shape_color, layer_settings.bull_text_color, layer_settings.bear_text_color, size.small, layer_settings.layer_name)
+	f_plotSignal(layer_settings.enable, layer_settings.bbp1, layer_settings.bbp1.bear_signal, "B-A-", final_tf, layer_settings.bull_shape_color, layer_settings.bear_shape_color, layer_settings.bull_text_color, layer_settings.bear_text_color, size.small, layer_settings.layer_name)
+	f_plotSignal(layer_settings.enable, layer_settings.bbp05, layer_settings.bbp05.bull_signal, "B-B+", final_tf, layer_settings.bull_shape_color, layer_settings.bear_shape_color, layer_settings.bull_text_color, layer_settings.bear_text_color, size.small, layer_settings.layer_name)
+	f_plotSignal(layer_settings.enable, layer_settings.bbp05, layer_settings.bbp05.bear_signal, "B-B-", final_tf, layer_settings.bull_shape_color, layer_settings.bear_shape_color, layer_settings.bull_text_color, layer_settings.bear_text_color, size.small, layer_settings.layer_name)
+	f_plotSignal(layer_settings.enable, layer_settings.bbp0, layer_settings.bbp0.bull_signal, "B-C+", final_tf, layer_settings.bull_shape_color, layer_settings.bear_shape_color, layer_settings.bull_text_color, layer_settings.bear_text_color, size.small, layer_settings.layer_name)
+	f_plotSignal(layer_settings.enable, layer_settings.bbp0, layer_settings.bbp0.bear_signal, "B-C-", final_tf, layer_settings.bull_shape_color, layer_settings.bear_shape_color, layer_settings.bull_text_color, layer_settings.bear_text_color, size.small, layer_settings.layer_name)
+	f_plotSignal(layer_settings.enable, layer_settings.cci_bA, layer_settings.cci_bA.bull_signal, "CCI-B-A", final_tf, layer_settings.bull_shape_color, layer_settings.bear_shape_color, layer_settings.bull_text_color, layer_settings.bear_text_color, size.small, layer_settings.layer_name)
+	f_plotSignal(layer_settings.enable, layer_settings.cci_bB, layer_settings.cci_bB.bull_signal, "CCI-B-B", final_tf, layer_settings.bull_shape_color, layer_settings.bear_shape_color, layer_settings.bull_text_color, layer_settings.bear_text_color, size.small, layer_settings.layer_name)
+	f_plotSignal(layer_settings.enable, layer_settings.cci_bC, layer_settings.cci_bC.bull_signal, "CCI-B-C", final_tf, layer_settings.bull_shape_color, layer_settings.bear_shape_color, layer_settings.bull_text_color, layer_settings.bear_text_color, size.small, layer_settings.layer_name)
+	f_plotSignal(layer_settings.enable, layer_settings.bbp_bA, layer_settings.bbp_bA.bull_signal, "%B-B-A", final_tf, layer_settings.bull_shape_color, layer_settings.bear_shape_color, layer_settings.bull_text_color, layer_settings.bear_text_color, size.small, layer_settings.layer_name)
+	f_plotSignal(layer_settings.enable, layer_settings.bbp_bB, layer_settings.bbp_bB.bull_signal, "%B-B-B", final_tf, layer_settings.bull_shape_color, layer_settings.bear_shape_color, layer_settings.bull_text_color, layer_settings.bear_text_color, size.small, layer_settings.layer_name)
+	f_plotSignal(layer_settings.enable, layer_settings.bbp_bC, layer_settings.bbp_bC.bull_signal, "%B-B-C", final_tf, layer_settings.bull_shape_color, layer_settings.bear_shape_color, layer_settings.bull_text_color, layer_settings.bear_text_color, size.small, layer_settings.layer_name)
+	f_plotSignal(layer_settings.enable, layer_settings.arrow0, layer_settings.arrow0.bull_signal, ".", final_tf, layer_settings.bull_shape_color, layer_settings.bear_shape_color, layer_settings.bull_text_color, layer_settings.bear_text_color, size.small, layer_settings.layer_name)
+	f_plotSignal(layer_settings.enable, layer_settings.arrow0, layer_settings.arrow0.bear_signal, ".", final_tf, layer_settings.bull_shape_color, layer_settings.bear_shape_color, layer_settings.bull_text_color, layer_settings.bear_text_color, size.small, layer_settings.layer_name)
+	f_plotSignal(layer_settings.enable, layer_settings.arrow1, layer_settings.arrow1.bull_signal, ".", final_tf, layer_settings.bull_shape_color, layer_settings.bear_shape_color, layer_settings.bull_text_color, layer_settings.bear_text_color, size.small, layer_settings.layer_name)
+	f_plotSignal(layer_settings.enable, layer_settings.arrow1, layer_settings.arrow1.bear_signal, ".", final_tf, layer_settings.bull_shape_color, layer_settings.bear_shape_color, layer_settings.bull_text_color, layer_settings.bear_text_color, size.small, layer_settings.layer_name)
+	f_plotSignal(layer_settings.enable, layer_settings.arrow2, layer_settings.arrow2.bull_signal, ".", final_tf, layer_settings.bull_shape_color, layer_settings.bear_shape_color, layer_settings.bull_text_color, layer_settings.bear_text_color, size.small, layer_settings.layer_name)
+	f_plotSignal(layer_settings.enable, layer_settings.arrow2, layer_settings.arrow2.bear_signal, ".", final_tf, layer_settings.bull_shape_color, layer_settings.bear_shape_color, layer_settings.bull_text_color, layer_settings.bear_text_color, size.small, layer_settings.layer_name)
+	f_plotSignal(layer_settings.enable, layer_settings.arrow2e, layer_settings.arrow2e.bull_signal, "⚬", final_tf, layer_settings.bull_shape_color, layer_settings.bear_shape_color, layer_settings.bull_text_color, layer_settings.bear_text_color, size.small, layer_settings.layer_name)
+	f_plotSignal(layer_settings.enable, layer_settings.arrow2e, layer_settings.arrow2e.bear_signal, "⚬", final_tf, layer_settings.bull_shape_color, layer_settings.bear_shape_color, layer_settings.bull_text_color, layer_settings.bear_text_color, size.small, layer_settings.layer_name)
+	f_plotSignal(layer_settings.enable, layer_settings.arrow3, layer_settings.arrow3.bull_signal, ".", final_tf, layer_settings.bull_shape_color, layer_settings.bear_shape_color, layer_settings.bull_text_color, layer_settings.bear_text_color, size.small, layer_settings.layer_name)
+	f_plotSignal(layer_settings.enable, layer_settings.arrow3, layer_settings.arrow3.bear_signal, ".", final_tf, layer_settings.bull_shape_color, layer_settings.bear_shape_color, layer_settings.bull_text_color, layer_settings.bear_text_color, size.small, layer_settings.layer_name)
+	f_plotSignal(layer_settings.enable, layer_settings.arrow4, layer_settings.arrow4.bull_signal, ".", final_tf, layer_settings.bull_shape_color, layer_settings.bear_shape_color, layer_settings.bull_text_color, layer_settings.bear_text_color, size.small, layer_settings.layer_name)
+	f_plotSignal(layer_settings.enable, layer_settings.arrow4, layer_settings.arrow4.bear_signal, ".", final_tf, layer_settings.bull_shape_color, layer_settings.bear_shape_color, layer_settings.bull_text_color, layer_settings.bear_text_color, size.small, layer_settings.layer_name)
+	f_plotSignal(layer_settings.enable, layer_settings.arrow5, layer_settings.arrow5.bull_signal, ".", final_tf, layer_settings.bull_shape_color, layer_settings.bear_shape_color, layer_settings.bull_text_color, layer_settings.bear_text_color, size.small, layer_settings.layer_name)
+	f_plotSignal(layer_settings.enable, layer_settings.arrow5, layer_settings.arrow5.bear_signal, ".", final_tf, layer_settings.bull_shape_color, layer_settings.bear_shape_color, layer_settings.bull_text_color, layer_settings.bear_text_color, size.small, layer_settings.layer_name)
+	f_plotSignal(layer_settings.enable, layer_settings.reversal_cci, layer_settings.reversal_cci.bull_signal, "CMR(T)", final_tf, layer_settings.bull_shape_color, layer_settings.bear_shape_color, layer_settings.bull_text_color, layer_settings.bear_text_color, size.small, layer_settings.layer_name)
+	f_plotSignal(layer_settings.enable, layer_settings.reversal_cci, layer_settings.reversal_cci.bear_signal, "CMR(T)", final_tf, layer_settings.bull_shape_color, layer_settings.bear_shape_color, layer_settings.bull_text_color, layer_settings.bear_text_color, size.small, layer_settings.layer_name)
+	f_plotSignal(layer_settings.enable, layer_settings.reversal_bbp, layer_settings.reversal_bbp.bull_signal, "BMR(T)", final_tf, layer_settings.bull_shape_color, layer_settings.bear_shape_color, layer_settings.bull_text_color, layer_settings.bear_text_color, size.small, layer_settings.layer_name)
+	f_plotSignal(layer_settings.enable, layer_settings.reversal_bbp, layer_settings.reversal_bbp.bear_signal, "BMR(T)", final_tf, layer_settings.bull_shape_color, layer_settings.bear_shape_color, layer_settings.bull_text_color, layer_settings.bear_text_color, size.small, layer_settings.layer_name)
+	f_plotSignal(layer_settings.enable, layer_settings.simul_breakout, layer_settings.simul_breakout.bull_signal, "SB", final_tf, layer_settings.bull_shape_color, layer_settings.bear_shape_color, layer_settings.bull_text_color, layer_settings.bear_text_color, size.small, layer_settings.layer_name)
+	f_plotSignal(layer_settings.enable, layer_settings.simul_breakout, layer_settings.simul_breakout.bear_signal, "SB", final_tf, layer_settings.bull_shape_color, layer_settings.bear_shape_color, layer_settings.bull_text_color, layer_settings.bear_text_color, size.small, layer_settings.layer_name)
+
+f_plotLayerSignals(l1_settings)
+f_plotLayerSignals(l2_settings)
+f_plotLayerSignals(l3_settings)
+
+if not na(currentLabelInfo.label_id)
+	f_createLabel(text_=currentLabelInfo.text_val, index=bar_index, price=currentLabelInfo.price)
+	f_reset_label_info()
